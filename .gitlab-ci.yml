@@ -1,0 +1,108 @@
+stages:
+  - test
+  - build
+  - upload
+  - release
+
+variables:
+  BINARY_NAME: "fleeting-plugin-upcloud"
+  PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}"
+  CGO_ENABLED: "0"
+
+default:
+  image: golang:1.25
+
+# ──────────────────────────────────────────────
+# Test
+# ──────────────────────────────────────────────
+
+test:
+  stage: test
+  script:
+    - go vet ./...
+    - go test ./...
+
+# ──────────────────────────────────────────────
+# Build (cross-compiled; darwin binaries are unsigned — sign locally after download)
+# ──────────────────────────────────────────────
+
+.build-common:
+  stage: build
+  script:
+    - |
+      VERSION="${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
+      COMMIT="${CI_COMMIT_SHORT_SHA}"
+      DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      LDFLAGS="-X main.buildVersion=${VERSION} -X main.buildCommit=${COMMIT} -X main.buildDate=${DATE}"
+      GOOS=${TARGET_OS} GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-amd64/${BINARY_NAME}" .
+      GOOS=${TARGET_OS} GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-arm64/${BINARY_NAME}" .
+
+build-linux:
+  extends: .build-common
+  variables:
+    TARGET_OS: linux
+  artifacts:
+    paths:
+      - bin/linux-amd64/
+      - bin/linux-arm64/
+
+build-darwin:
+  extends: .build-common
+  variables:
+    TARGET_OS: darwin
+  artifacts:
+    paths:
+      - bin/darwin-amd64/
+      - bin/darwin-arm64/
+
+# ──────────────────────────────────────────────
+# Upload binaries to the package registry (tags only)
+# ──────────────────────────────────────────────
+
+upload:
+  stage: upload
+  image: curlimages/curl:latest
+  needs:
+    - job: build-linux
+      artifacts: true
+    - job: build-darwin
+      artifacts: true
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - |
+      for PLATFORM in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
+        echo "Uploading ${BINARY_NAME}-${PLATFORM}..."
+        curl --fail --silent --show-error \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "bin/${PLATFORM}/${BINARY_NAME}" \
+          "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-${PLATFORM}"
+      done
+
+# ──────────────────────────────────────────────
+# Create GitLab release with asset links (tags only)
+# ──────────────────────────────────────────────
+
+release:
+  stage: release
+  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  needs:
+    - job: upload
+  rules:
+    - if: $CI_COMMIT_TAG
+  script:
+    - echo "Creating release ${CI_COMMIT_TAG}"
+  release:
+    name: "${CI_COMMIT_TAG}"
+    tag_name: "${CI_COMMIT_TAG}"
+    description: "Release ${CI_COMMIT_TAG}"
+    assets:
+      links:
+        - name: "${BINARY_NAME}-linux-amd64"
+          url: "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-linux-amd64"
+        - name: "${BINARY_NAME}-linux-arm64"
+          url: "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-linux-arm64"
+        - name: "${BINARY_NAME}-darwin-amd64"
+          url: "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-darwin-amd64"
+        - name: "${BINARY_NAME}-darwin-arm64"
+          url: "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-darwin-arm64"
