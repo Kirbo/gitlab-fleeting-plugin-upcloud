@@ -93,86 +93,82 @@ just build-mac
 
 Using a pre-baked template (a server image that already has Docker installed) means instances are ready in seconds rather than having to bootstrap from scratch on every boot. The following steps use the [upctl](https://github.com/UpCloudLtd/upcloud-cli) CLI.
 
-### 1. Find the Debian 13 base template UUID
-
-```sh
-upctl storage list --public | grep -i debian
-```
-
-Note the UUID of the Debian 13 entry — you will use it in the next step.
-
-### 2. Create a builder server
+### 1. Create a builder server based on Debian 13 Trixie
 
 ```sh
 upctl server create \
   --zone fi-hel1 \
-  --title "docker-template-builder" \
-  --hostname "docker-template-builder" \
-  --plan 2xCPU-4GB \
-  --storage action=clone,storage=<debian-13-template-uuid>,size=30,tier=standard \
+  --os "Debian GNU/Linux 13 (Trixie)" \
+  --os-storage-size 10 \
+  --hostname "gitlab-runner-template" \
+  --plan "4xCPU-8GB" \
   --network family=IPv4,type=public \
   --ssh-keys ~/.ssh/id_rsa.pub
 ```
 
-Or try to use this oneliner:
+### 2. Wait until the server has started
 
 ```sh
-upctl server create \
-  --zone fi-hel1 \
-  --title "docker-template-builder" \
-  --hostname "docker-template-builder" \
-  --plan 2xCPU-4GB \
-  --storage action=clone,storage=$(upctl storage list --public | grep -i trixie | grep -i template | awk '{print $1}'),size=30,tier=standard \
-  --network family=IPv4,type=public \
-  --ssh-keys ~/.ssh/id_rsa.pub
+while true; do
+  STATE=$(upctl server show gitlab-runner-template -o json | jq -r '.state')
+  echo -e "\rCurrent state: ${STATE}"
+  if [[ "${STATE}" == "started" ]]; then
+    echo -e "\nServer started successfully."
+    break
+  elif (( TRIES >= 60 )); then
+    echo -e "\nAborted due maximum 60 tries."
+    break
+  fi
+
+  sleep 5
+  ((TRIES++))
+done
 ```
 
-Wait until the server is in the `started` state and note its UUID and public IP:
+### 3. Prepare the server and shut it down
 
 ```sh
-upctl server show docker-template-builder
+ssh root@$(upctl server show gitlab-runner-template -o json | jq -r '.ip_addresses[0].address') \
+  "curl -fsSL 'https://gist.githubusercontent.com/Kirbo/a037f984643a18ae037089b6c0305e79/raw' | /bin/bash -s --"
 ```
 
-### 3. Install Docker
+### 4. Wait until the server has stopped
 
-```sh
-ssh root@<server-ip> "curl -fsSL https://get.docker.com | sh && systemctl enable docker"
+```bash
+while true; do
+  STATE=$(upctl server show gitlab-runner-template -o json | jq -r '.state')
+  echo -e "\rCurrent state: ${STATE}"
+  if [[ "${STATE}" == "stopped" ]]; then
+    echo -e "\nServer stopped successfully."
+    break
+  elif (( TRIES >= 60 )); then
+    echo -e "\nAborted due maximum 60 tries."
+    break
+  fi
+
+  sleep 5
+  ((TRIES++))
+done
 ```
 
-Add any other packages your CI jobs require (e.g. `git`, `make`, language runtimes). Once you are done, exit the SSH session.
-
-### 4. Stop the server cleanly
+### 5. Templatise the storage
 
 ```sh
-upctl server stop --type soft --wait docker-template-builder
-```
-
-### 5. Find the server's storage device UUID
-
-```sh
-upctl server show docker-template-builder
-```
-
-Under the **Storage devices** section, note the UUID of the boot disk.
-
-### 6. Templatize the storage
-
-```sh
-upctl storage templatise <storage-uuid> --title "docker-runner-template"
+upctl storage templatise "$(upctl server show gitlab-runner-template -o json | jq -r '.storage_devices[0].storage')" --title "GitLab Runner - Debian 13" --wait
 ```
 
 This creates a new private template in your account without touching the original server.
 
-### 7. Delete the builder server and its original storage
+### 5. Delete the builder server and its original storage
 
 ```sh
-upctl server delete --delete-storages docker-template-builder
+upctl server delete --delete-storages gitlab-runner-template
 ```
 
-### 8. Retrieve the template UUID
+### 6. Retrieve the template UUID
 
 ```sh
-upctl storage list --template | grep docker-runner-template
+upctl storage list --template
 ```
 
 Copy the UUID — this is the value to use as `template` in `[runners.autoscaler.plugin_config]`.
@@ -199,8 +195,8 @@ shutdown_timeout = 0
   request_concurrency = 5
 
   [runners.docker]
-    image = "alpine:latest"
-    privileged = true
+    image       = "alpine:latest"
+    privileged  = true
 
   [runners.cache]
     [runners.cache.s3]
@@ -208,20 +204,11 @@ shutdown_timeout = 0
     [runners.cache.azure]
 
   [runners.autoscaler]
-    plugin = "fleeting-plugin-upcloud"
-
-    # Wait until Docker is ready before accepting jobs.
-    # Use one of the two options below:
-
-    # If you use the Custom Image
-    #   instance_ready_command = "docker info"
-
-    # If you use one of the Official Images
-    #   instance_ready_command = "timeout 300 bash -c 'until [ -f /var/run/docker-ready ]; do sleep 5; done'"
-
-    capacity_per_instance = 1
-    max_use_count         = 10
-    max_instances         = 5
+    plugin                  = "fleeting-plugin-upcloud"
+    instance_ready_command  = "docker info"
+    capacity_per_instance   = 4
+    max_use_count           = 60
+    max_instances           = 5
 
   [[runners.autoscaler.policy]]
     idle_count = 0
@@ -235,28 +222,23 @@ shutdown_timeout = 0
     # password = "<your-upcloud-password>"
 
     zone     = "fi-hel1"         # UpCloud zone
-    template = "<storage-uuid>"  # OS template UUID
+    template = "<storage-uuid>"  # Custom Image UUID
     name     = "my-runner-group" # unique label for this runner group
 
     # Optional
-    plan         = "1xCPU-2GB"   # default: "1xCPU-2GB"
-    storage_tier = "standard"    # "maxiops" or "standard"; default: inherit from template
-    storage_size = 30            # GB; default: inherit from template
+    plan         = "4xCPU-8GB"   # default: "1xCPU-2GB"
+    storage_tier = "maxiops"     # "maxiops" or "standard"; default: inherit from template
+    storage_size = 40            # GB; default: inherit from template
     name_prefix  = "fleeting"    # hostname prefix; default: "fleeting"
-    max_size     = 100           # hard cap on concurrent instances; default: 100
-
-    # If you want to use Initialization Script (e.g. if you use Official Images)
-    # Cloud-init: URL to a user-data script run on first boot, or an inline script body
-    # Example can be found in https://gist.github.com/Kirbo/ce516834616930a8c7b35082b8ff5627
-    # user_data = "https://example.com/your-init-script.sh"
+    max_size     = 10            # hard cap on concurrent instances; default: 100
 
   [runners.autoscaler.connector_config]
-    username          = "root"
-    key_path          = "/home/<your-user>/.gitlab-runner/keys/<key-name>"
-    protocol          = "ssh"
     os                = "linux"
     arch              = "amd64"
+    protocol          = "ssh"
     use_external_addr = true
+    username          = "root"
+    key_path          = "/home/<your-user>/.gitlab-runner/keys/<key-name>"
 ```
 
 ## Plugin config reference
