@@ -1,16 +1,68 @@
 stages:
+  - init
   - test
   - build
-  - upload
   - release
+
+workflow:
+  rules:
+    # Run pipeline for merge requests
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    # Run pipeline for pushes to default branch
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+    # Run pipeline for pushes to branches without open merge requests
+    - if: "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS"
+      when: never
+    # Run pipeline for all other branch pushes
+    - if: "$CI_COMMIT_BRANCH"
+    # Run pipeline for web/api triggers
+    - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
   BINARY_NAME: "fleeting-plugin-upcloud"
   PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}"
   CGO_ENABLED: "0"
+  GIT_DEPTH: "0"
+  GIT_STRATEGY: clone
 
 default:
   image: golang:1.25
+  tags:
+    - upcloud
+
+# ──────────────────────────────────────────────
+# Init
+# ──────────────────────────────────────────────
+
+# Dry-run semantic-release to determine the next version and generate changelog.
+# Writes VERSION to build.env (dotenv artifact) so downstream jobs receive it
+# as a CI variable. VERSION is empty when there are no releasable commits.
+bump-version:
+  stage: init
+  image:
+    name: registry.gitlab.com/go-semantic-release/semantic-release:latest
+    entrypoint: [""]
+  interruptible: true
+  cache: []
+  artifacts:
+    paths:
+      - .version-unreleased
+      - CHANGELOG.md
+      - build.env
+    reports:
+      dotenv: build.env
+    expire_in: never
+  script:
+    - semantic-release --version-file --changelog CHANGELOG.md --dry || true
+    - export VERSION=$(cat .version-unreleased 2>/dev/null || echo "")
+    - echo "VERSION=${VERSION}" > build.env
+    - |
+      if [ -n "$VERSION" ]; then
+        echo "Next release: v${VERSION}"
+        cat CHANGELOG.md
+      else
+        echo "No releasable commits found; skipping release."
+      fi
 
 # ──────────────────────────────────────────────
 # Test
@@ -18,6 +70,7 @@ default:
 
 test:
   stage: test
+  needs: []
   script:
     - go vet ./...
     - go test ./...
@@ -28,81 +81,83 @@ test:
 
 .build-common:
   stage: build
+  rules:
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+      changes:
+        - "**/*.go"
+        - go.mod
+        - go.sum
+  needs:
+    - job: bump-version
+      artifacts: true
+    - job: test
+      artifacts: false
   script:
     - |
-      VERSION="${CI_COMMIT_TAG:-${CI_COMMIT_SHORT_SHA}}"
       COMMIT="${CI_COMMIT_SHORT_SHA}"
       DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      LDFLAGS="-X main.buildVersion=${VERSION} -X main.buildCommit=${COMMIT} -X main.buildDate=${DATE}"
+      BUILD_VERSION="${VERSION:-${CI_COMMIT_SHORT_SHA}}"
+      LDFLAGS="-X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${COMMIT} -X main.buildDate=${DATE}"
       GOOS=${TARGET_OS} GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-amd64/${BINARY_NAME}" .
       GOOS=${TARGET_OS} GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-arm64/${BINARY_NAME}" .
+    - |
+      if [ -n "${BUILD_VERSION}" ]; then
+        for GOARCH in amd64 arm64; do
+          echo "Uploading ${BINARY_NAME}-${TARGET_OS}-${GOARCH}..."
+          curl --fail --silent --show-error \
+            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+            --upload-file "bin/${TARGET_OS}-${GOARCH}/${BINARY_NAME}" \
+            "${PACKAGE_REGISTRY_URL}/${BUILD_VERSION}/${BINARY_NAME}-${TARGET_OS}-${GOARCH}"
+        done
+      fi
 
 build-linux:
   extends: .build-common
   variables:
     TARGET_OS: linux
-  artifacts:
-    paths:
-      - bin/linux-amd64/
-      - bin/linux-arm64/
 
 build-darwin:
   extends: .build-common
   variables:
     TARGET_OS: darwin
-  artifacts:
-    paths:
-      - bin/darwin-amd64/
-      - bin/darwin-arm64/
 
 # ──────────────────────────────────────────────
-# Upload binaries to the package registry (tags only)
+# Release
 # ──────────────────────────────────────────────
 
-upload:
-  stage: upload
-  image: curlimages/curl:latest
-  needs:
-    - job: build-linux
-      artifacts: true
-    - job: build-darwin
-      artifacts: true
-  rules:
-    - if: $CI_COMMIT_TAG
-  script:
-    - |
-      for PLATFORM in linux-amd64 linux-arm64 darwin-amd64 darwin-arm64; do
-        echo "Uploading ${BINARY_NAME}-${PLATFORM}..."
-        curl --fail --silent --show-error \
-          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-          --upload-file "bin/${PLATFORM}/${BINARY_NAME}" \
-          "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-${PLATFORM}"
-      done
-
-# ──────────────────────────────────────────────
-# Create GitLab release with asset links (tags only)
-# ──────────────────────────────────────────────
-
-release:
+# Creates the Git tag and GitLab release in one step using the version and
+# changelog from bump-version, then attaches the binaries as asset links.
+# Uses CI_JOB_TOKEN — no custom GITLAB_TOKEN required.
+# Skips gracefully when VERSION is empty (no releasable commits).
+create-release:
   stage: release
   image: registry.gitlab.com/gitlab-org/release-cli:latest
-  needs:
-    - job: upload
   rules:
-    - if: $CI_COMMIT_TAG
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+      changes:
+        - "**/*.go"
+        - go.mod
+        - go.sum
+  needs:
+    - job: bump-version
+      artifacts: true
+    - job: build-linux
+      artifacts: false
+    - job: build-darwin
+      artifacts: false
   script:
-    - echo "Creating release ${CI_COMMIT_TAG}"
-  release:
-    name: "${CI_COMMIT_TAG}"
-    tag_name: "${CI_COMMIT_TAG}"
-    description: "Release ${CI_COMMIT_TAG}"
-    assets:
-      links:
-        - name: "${BINARY_NAME}-linux-amd64"
-          url: "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-linux-amd64"
-        - name: "${BINARY_NAME}-linux-arm64"
-          url: "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-linux-arm64"
-        - name: "${BINARY_NAME}-darwin-amd64"
-          url: "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-darwin-amd64"
-        - name: "${BINARY_NAME}-darwin-arm64"
-          url: "${PACKAGE_REGISTRY_URL}/${CI_COMMIT_TAG}/${BINARY_NAME}-darwin-arm64"
+    - |
+      if [ -z "$VERSION" ]; then
+        echo "VERSION is empty — no releasable commits. Skipping release."
+        exit 0
+      fi
+
+      release-cli create \
+        --name "v${VERSION}" \
+        --tag-name "v${VERSION}" \
+        --ref "${CI_COMMIT_SHA}" \
+        --description "CHANGELOG.md" \
+        --assets-link "{\"name\":\"${BINARY_NAME}-linux-amd64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-amd64\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"${BINARY_NAME}-linux-arm64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-arm64\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-amd64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-amd64\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-arm64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-arm64\",\"link_type\":\"package\"}"

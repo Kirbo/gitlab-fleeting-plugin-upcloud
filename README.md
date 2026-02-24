@@ -9,53 +9,29 @@ A [GitLab fleeting](https://gitlab.com/gitlab-org/fleeting/fleeting) plugin that
 The install script detects your OS and architecture automatically and downloads the correct binary from the latest release:
 
 ```sh
-curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/install.sh | bash
-```
-
-By default the binary is installed to `~/.gitlab-runner/plugins/`. Override with `INSTALL_DIR`:
-
-```sh
-INSTALL_DIR=/usr/local/bin curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/install.sh | bash
+curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
 ```
 
 ### Manual download
 
-Download the binary for your platform from the [releases page](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases), place it in `~/.gitlab-runner/plugins/`, and make it executable:
+Download the binary for your platform from the [releases page](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases), rename it to `fleeting-plugin-upcloud`, and place it on your `$PATH`:
 
 ```sh
-chmod +x ~/.gitlab-runner/plugins/fleeting-plugin-upcloud
+# example for linux/amd64
+curl -fsSL -o /root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/fleeting-plugin-upcloud "<download-url-for-fleeting-plugin-upcloud-linux-amd64>"
+chmod +x /root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/fleeting-plugin-upcloud
 ```
 
-#### macOS: ad-hoc sign the binary
-
-On macOS (especially Apple Silicon) the runner will refuse to execute an unsigned binary. After placing it, sign it with an ad-hoc identity:
+### Verify it's found
 
 ```sh
-codesign --sign - ~/.gitlab-runner/plugins/fleeting-plugin-upcloud
+gitlab-runner fleeting list
 ```
-
-If you installed to a different path, adjust accordingly.
-
-### Adding the install directory to PATH
-
-The default install directory (`~/.gitlab-runner/plugins/`) is intentionally **not** on PATH — GitLab Runner finds the plugin by name without needing it there. However, if you want to invoke the binary directly from your shell (e.g. for debugging), add the directory to your shell's startup file:
-
-**bash** (`~/.bashrc` or `~/.bash_profile`):
+..should output something like:
 ```sh
-export PATH="$HOME/.gitlab-runner/plugins:$PATH"
+Runtime platform                                    arch=amd64 os=linux pid=12402 revision=07e534ba version=18.9.0
+runner: TCfHVcDHi, plugin: fleeting-plugin-upcloud, path: /root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/fleeting-plugin-upcloud
 ```
-
-**zsh** (`~/.zshrc`):
-```sh
-export PATH="$HOME/.gitlab-runner/plugins:$PATH"
-```
-
-Then reload the file or open a new terminal:
-```sh
-source ~/.zshrc   # or ~/.bashrc
-```
-
-If you installed to a custom `INSTALL_DIR`, substitute that path instead.
 
 ### Build from source
 
@@ -111,12 +87,12 @@ upctl server create \
 ```sh
 while true; do
   STATE=$(upctl server show gitlab-runner-template -o json | jq -r '.state')
-  echo -e "\rCurrent state: ${STATE}"
+  echo "Current state: ${STATE}"
   if [[ "${STATE}" == "started" ]]; then
-    echo -e "\nServer started successfully."
+    echo "Server started successfully."
     break
   elif (( TRIES >= 60 )); then
-    echo -e "\nAborted due maximum 60 tries."
+    echo "Aborted due maximum 60 tries."
     break
   fi
 
@@ -129,7 +105,7 @@ done
 
 ```sh
 ssh root@$(upctl server show gitlab-runner-template -o json | jq -r '.ip_addresses[0].address') \
-  "curl -fsSL 'https://gist.githubusercontent.com/Kirbo/a037f984643a18ae037089b6c0305e79/raw' | /bin/bash -s --"
+  "curl -fsSL 'https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/custom-image-debian13.sh' | bash"
 ```
 
 ### 4. Wait until the server has stopped
@@ -137,12 +113,12 @@ ssh root@$(upctl server show gitlab-runner-template -o json | jq -r '.ip_address
 ```bash
 while true; do
   STATE=$(upctl server show gitlab-runner-template -o json | jq -r '.state')
-  echo -e "\rCurrent state: ${STATE}"
+  echo "Current state: ${STATE}"
   if [[ "${STATE}" == "stopped" ]]; then
-    echo -e "\nServer stopped successfully."
+    echo "Server stopped successfully."
     break
   elif (( TRIES >= 60 )); then
-    echo -e "\nAborted due maximum 60 tries."
+    echo "Aborted due maximum 60 tries."
     break
   fi
 
@@ -159,13 +135,13 @@ upctl storage templatise "$(upctl server show gitlab-runner-template -o json | j
 
 This creates a new private template in your account without touching the original server.
 
-### 5. Delete the builder server and its original storage
+### 6. Delete the builder server and its original storage
 
 ```sh
 upctl server delete --delete-storages gitlab-runner-template
 ```
 
-### 6. Retrieve the template UUID
+### 7. Retrieve the template UUID
 
 ```sh
 upctl storage list --template
@@ -173,9 +149,25 @@ upctl storage list --template
 
 Copy the UUID — this is the value to use as `template` in `[runners.autoscaler.plugin_config]`.
 
+### 8. Create SSH key
+
+```sh
+ssh-keygen -f ~/.ssh/gitlab-cicd
+```
+
+### 9. Register GitLab Runner
+
+Follow the instructions [how to register a GitLab Runner](https://docs.gitlab.com/tutorials/create_register_first_runner/#create-and-register-a-project-runner).
+
+```sh
+gitlab-runner register  --url https://gitlab.com --name "UpCloud GitLab Runner" --executor docker-autoscaler --docker-image "alpine:latest"
+```
+
+Paste the Token you got from GitLab
+
 ## Configuration
 
-Add the plugin to your `~/.gitlab-runner/config.toml`. The key sections are `executor = "docker-autoscaler"`, the `[runners.autoscaler]` block pointing to the plugin, and the `[runners.autoscaler.plugin_config]` block with your UpCloud credentials and server settings.
+Configure `/etc/gitlab-runner/config.toml`
 
 ```toml
 concurrent = 5
@@ -183,62 +175,80 @@ check_interval = 0
 connection_max_age = "15m0s"
 shutdown_timeout = 0
 
+[session_server]
+  session_timeout = 1800
+
 [[runners]]
-  name = "my-runner"
+  name = "UpCloud GitLab Runner"
   url = "https://gitlab.com"
   id = 0
-  token = "<your-runner-token>"
-  token_obtained_at = 2025-01-01T00:00:00Z
+  token = "<your GitLab Runner Token>"
+  token_obtained_at = 2026-02-24T11:23:22Z
   token_expires_at = 0001-01-01T00:00:00Z
-  tags = ["docker", "linux"]
   executor = "docker-autoscaler"
-  request_concurrency = 5
-
-  [runners.docker]
-    image       = "alpine:latest"
-    privileged  = true
 
   [runners.cache]
+    MaxUploadedArchiveSize = 0
     [runners.cache.s3]
     [runners.cache.gcs]
     [runners.cache.azure]
-
+  
+  [runners.docker]
+    tls_verify = false
+    image = "alpine:latest"
+    privileged = false
+    disable_entrypoint_overwrite = false
+    oom_kill_disable = false
+    disable_cache = false
+    volumes = ["/cache"]
+    shm_size = 0
+    network_mtu = 0
+  
   [runners.autoscaler]
-    plugin                  = "fleeting-plugin-upcloud"
-    instance_ready_command  = "docker info"
-    capacity_per_instance   = 4
-    max_use_count           = 60
-    max_instances           = 5
-
-  [[runners.autoscaler.policy]]
-    idle_count = 0
-    idle_time  = "45m0s"
-    periods    = ["* * * * *"]
-
-  [runners.autoscaler.plugin_config]
-    # Auth: use a Personal Access Token (recommended) or username + password
-    token    = "<your-upcloud-api-token>"
-    # username = "<your-upcloud-username>"
-    # password = "<your-upcloud-password>"
-
-    zone     = "fi-hel1"         # UpCloud zone
-    template = "<storage-uuid>"  # Custom Image UUID
-    name     = "my-runner-group" # unique label for this runner group
-
-    # Optional
-    plan         = "4xCPU-8GB"   # default: "1xCPU-2GB"
-    storage_tier = "maxiops"     # "maxiops" or "standard"; default: inherit from template
-    storage_size = 40            # GB; default: inherit from template
-    name_prefix  = "fleeting"    # hostname prefix; default: "fleeting"
-    max_size     = 10            # hard cap on concurrent instances; default: 100
-
-  [runners.autoscaler.connector_config]
-    os                = "linux"
-    arch              = "amd64"
-    protocol          = "ssh"
-    use_external_addr = true
-    username          = "root"
-    key_path          = "/home/<your-user>/.gitlab-runner/keys/<key-name>"
+    capacity_per_instance = 4
+    max_use_count = 60
+    max_instances = 5
+    plugin = "/root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/fleeting-plugin-upcloud"
+    instance_ready_command = "docker info"
+    instance_acquire_timeout = "0s"
+    update_interval = "0s"
+    update_interval_when_expecting = "0s"
+    deletion_retry_interval = "0s"
+    shutdown_deletion_interval = "0s"
+    shutdown_deletion_retries = 0
+    failure_threshold = 0
+    delete_instances_on_shutdown = true
+    
+    [runners.autoscaler.plugin_config]
+      # Auth: use a Personal Access Token (recommended) or username + password
+      token = "<your UpCloud API Token>"
+      # username = "<your UpCloud Username>"
+      # password = "<your UpCloud Password>"
+      template = "<your UpCloud Custom Image UUID>"
+      name = "my-runner-group"
+      plan = "4xCPU-8GB"
+      storage_size = 20
+      storage_tier = "maxiops"
+      zone = "fi-hel1"
+    
+    [runners.autoscaler.connector_config]
+      os = "linux"
+      arch = "amd64"
+      protocol = "ssh"
+      protocol_port = 0
+      username = "root"
+      key_path = "/root/.ssh/gitlab"
+      keepalive = "0s"
+      timeout = "0s"
+      use_external_addr = true
+    
+    [[runners.autoscaler.policy]]
+      periods = ["* * * * *"]
+      idle_count = 0
+      idle_time = "45m0s"
+      scale_factor = 0.0
+      scale_factor_limit = 0
+      preemptive_mode = false
 ```
 
 ## Plugin config reference
