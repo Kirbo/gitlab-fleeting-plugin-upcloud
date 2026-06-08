@@ -99,6 +99,7 @@ while true; do
   sleep 5
   ((TRIES++))
 done
+sleep 5 # Extra wait to ensure SSH is ready
 ```
 
 ### 3. Prepare the server and shut it down
