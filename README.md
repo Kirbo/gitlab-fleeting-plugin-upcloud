@@ -130,10 +130,12 @@ done
 ### 5. Templatise the storage
 
 ```sh
-upctl storage templatise "$(upctl server show gitlab-runner-template -o json | jq -r '.storage_devices[0].storage')" --title "GitLab Runner - Debian 13" --wait
+upctl storage templatise "$(upctl server show gitlab-runner-template -o json | jq -r '.storage_devices[0].storage')" --title "GitLab Runner - Debian 13 ($(date +%F))" --wait
 ```
 
 This creates a new private template in your account without touching the original server.
+
+> The `$(date +%F)` suffix date-stamps the title (e.g. `GitLab Runner - Debian 13 (2026-06-08)`). Each `templatise` mints a **new** template UUID, so when you rebuild later to pick up package updates the date in the title lets you tell versions apart in `upctl storage list --template` and confirm which one your config points at.
 
 ### 6. Delete the builder server and its original storage
 
