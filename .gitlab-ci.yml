@@ -32,7 +32,9 @@ variables:
 
 # Toolchain comes from mise.toml (same as local dev)
 default:
-  image: ghcr.io/jdx/mise:latest
+  image:
+    name: ghcr.io/jdx/mise:latest
+    entrypoint: [""]
   tags:
     - upcloud
   before_script:
