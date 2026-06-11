@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 
@@ -93,6 +95,13 @@ func (g *InstanceGroup) validate() error {
 	// 	g.StorageSize = defaultStorageSize
 	// }
 	if g.NamePrefix == "" {
+		g.NamePrefix = defaultNamePrefix
+	}
+	// UpCloud rejects hostnames that aren't RFC 1123 labels (uppercase letters,
+	// underscores, etc. trigger HOSTNAME_INVALID). Sanitize the configured prefix
+	// so values like "CI" or "My_Runner" still work, falling back to the default
+	// if nothing valid remains.
+	if g.NamePrefix = sanitizeNamePrefix(g.NamePrefix); g.NamePrefix == "" {
 		g.NamePrefix = defaultNamePrefix
 	}
 	if g.TitlePrefix == "" {
@@ -380,6 +389,20 @@ func (g *InstanceGroup) Heartbeat(ctx context.Context, id string) error {
 // Shutdown performs cleanup before the plugin exits.
 func (g *InstanceGroup) Shutdown(_ context.Context) error {
 	return nil
+}
+
+// namePrefixInvalidChars matches runs of characters not allowed in a hostname label.
+var namePrefixInvalidChars = regexp.MustCompile(`[^a-z0-9]+`)
+
+// sanitizeNamePrefix normalizes an arbitrary name_prefix into a valid hostname
+// label fragment: lowercased, with runs of invalid characters collapsed to a
+// single hyphen and leading/trailing hyphens trimmed. UpCloud rejects hostnames
+// that aren't RFC 1123 labels, so "CI" becomes "ci" and "My_Runner!" becomes
+// "my-runner". Returns "" if nothing valid remains.
+func sanitizeNamePrefix(s string) string {
+	s = strings.ToLower(s)
+	s = namePrefixInvalidChars.ReplaceAllString(s, "-")
+	return strings.Trim(s, "-")
 }
 
 // randomSuffix generates a random lowercase alphanumeric string of length n.

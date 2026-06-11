@@ -269,7 +269,7 @@ All fields go under `[runners.autoscaler.plugin_config]`.
 | `plan` | no | `1xCPU-2GB` | UpCloud server plan |
 | `storage_tier` | no | (from template) | `maxiops` or `standard` |
 | `storage_size` | no | (from template) | Storage size in GB |
-| `name_prefix` | no | `fleeting` | Prefix for generated hostnames |
+| `name_prefix` | no | `fleeting` | Prefix for generated hostnames. Sanitized to a valid RFC 1123 label: lowercased, with invalid characters collapsed to hyphens (e.g. `CI` → `ci`). The server title keeps its original casing via `title_prefix`. |
 | `title_prefix` | no | `fleeting-plugin-upcloud` | Prefix for generated server titles |
 | `max_size` | no | `100` | Maximum number of concurrent instances |
 | `use_private_network` | no | `false` | Connect via private IP instead of public |

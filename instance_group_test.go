@@ -260,6 +260,30 @@ func TestRandomSuffix(t *testing.T) {
 	}
 }
 
+// ─── sanitizeNamePrefix ─────────────────────────────────────────────────────────
+
+func TestSanitizeNamePrefix(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"fleeting", "fleeting"},
+		{"CI", "ci"},
+		{"GitLab", "gitlab"},
+		{"My_Runner", "my-runner"},
+		{"My_Runner!", "my-runner"},
+		{"--ci--", "ci"},
+		{"a..b", "a-b"},
+		{"  spaced  ", "spaced"},
+		{"___", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := sanitizeNamePrefix(c.in); got != c.want {
+			t.Errorf("sanitizeNamePrefix(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
+
 // ─── Update ───────────────────────────────────────────────────────────────────
 
 func TestUpdate(t *testing.T) {
