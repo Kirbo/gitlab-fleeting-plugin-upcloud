@@ -44,22 +44,11 @@ runner: TCfHVcDHi, plugin: fleeting-plugin-upcloud, path: /usr/local/bin/fleetin
 
 ### Build from source
 
-Requires Go 1.25+ and [just](https://just.systems) ([docs](https://just.systems/man/en/)).
-
-Install `just`:
+The toolchain (Go, [just](https://just.systems), plus `jq` and `upctl` used in the workflows below) is managed with [mise](https://mise.jdx.dev/) and pinned in [`mise.toml`](mise.toml). Install [mise](https://mise.jdx.dev/getting-started.html), then from the repository root:
 
 ```sh
-# macOS
-brew install just
-
-# Linux (Debian/Ubuntu 24.04+)
-apt install just
-
-# Any platform via cargo
-cargo install just
-
-# Any platform — pre-built binary (see https://github.com/casey/just/releases)
-curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh | bash -s -- --to /usr/local/bin
+mise trust   # approve this repo's mise.toml (first time only)
+mise install
 ```
 
 ```sh
@@ -76,7 +65,7 @@ just build-mac
 
 ## Creating a custom UpCloud template
 
-Using a pre-baked template (a server image that already has Docker installed) means instances are ready in seconds rather than having to bootstrap from scratch on every boot. The following steps use the [upctl](https://github.com/UpCloudLtd/upcloud-cli) CLI.
+Using a pre-baked template (a server image that already has Docker installed) means instances are ready in seconds rather than having to bootstrap from scratch on every boot. The following steps use the [upctl](https://github.com/UpCloudLtd/upcloud-cli) CLI and `jq` (both installed by `mise install`, see [Build from source](#build-from-source)).
 
 ### 1. Create a builder server based on Debian 13 Trixie
 

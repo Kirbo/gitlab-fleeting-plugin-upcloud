@@ -24,11 +24,25 @@ variables:
   CGO_ENABLED: "0"
   GIT_DEPTH: "0"
   GIT_STRATEGY: clone
+  # Keep mise tools and the Go module cache inside the project dir so they can be cached
+  MISE_DATA_DIR: "$CI_PROJECT_DIR/.mise"
+  GOPATH: "$CI_PROJECT_DIR/.go"
+  # Trust mise.toml without an interactive prompt (idempotent, unlike `mise trust`)
+  MISE_TRUSTED_CONFIG_PATHS: "$CI_PROJECT_DIR"
 
+# Toolchain comes from mise.toml (same as local dev)
 default:
-  image: golang:1.25
+  image: jdx/mise:latest
   tags:
     - upcloud
+  before_script:
+    - mise install
+    - eval "$(mise env -s bash)"
+  cache:
+    key: mise-toolchain
+    paths:
+      - .mise
+      - .go/pkg/mod
 
 # ──────────────────────────────────────────────
 # Init
@@ -43,6 +57,7 @@ bump-version:
     name: registry.gitlab.com/go-semantic-release/semantic-release:latest
     entrypoint: [""]
   interruptible: true
+  before_script: []
   cache: []
   artifacts:
     paths:
@@ -72,8 +87,8 @@ test:
   stage: test
   needs: []
   script:
-    - go vet ./...
-    - go test ./...
+    - just vet
+    - just test
 
 # ──────────────────────────────────────────────
 # Build (cross-compiled; darwin binaries are unsigned — sign locally after download)
@@ -132,6 +147,8 @@ build-darwin:
 create-release:
   stage: release
   image: registry.gitlab.com/gitlab-org/release-cli:latest
+  before_script: []
+  cache: []
   rules:
     - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
       changes:

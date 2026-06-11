@@ -1,2 +1,4 @@
 bin
 fleeting-plugin-upcloud
+.mise/
+.go/
