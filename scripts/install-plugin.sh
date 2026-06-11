@@ -5,7 +5,9 @@ REPO="kirbo/gitlab-fleeting-plugin-upcloud"
 # Named fleeting-plugin-* so GitLab Runner discovers it via exec.LookPath("fleeting-plugin-upcloud").
 # The plugin field in config.toml must match: plugin = "fleeting-plugin-upcloud"
 BINARY_NAME="fleeting-plugin-upcloud"
-INSTALL_DIR="${INSTALL_DIR:-/root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/${BINARY_NAME}}"
+# Full path the binary is installed to. /usr/local/bin is on root's PATH, so
+# config.toml can reference the plugin by bare name. Override with INSTALL_PATH.
+INSTALL_PATH="${INSTALL_PATH:-${INSTALL_DIR:-/usr/local/bin/${BINARY_NAME}}}"
 
 # --- Detect OS ---
 OS="$(uname -s)"
@@ -73,8 +75,14 @@ trap 'rm -f "${TMPFILE}"' EXIT
 curl -fsSL --progress-bar -o "${TMPFILE}" "${DOWNLOAD_URL}"
 chmod +x "${TMPFILE}"
 
-mkdir -p "$(dirname "${INSTALL_DIR}")"
-mv "${TMPFILE}" "${INSTALL_DIR}"
-chmod +x "${INSTALL_DIR}"
+mkdir -p "$(dirname "${INSTALL_PATH}")"
+mv "${TMPFILE}" "${INSTALL_PATH}"
+chmod +x "${INSTALL_PATH}"
 
-echo "Installed: ${INSTALL_DIR}"
+echo "Installed: ${INSTALL_PATH}"
+echo
+echo "Reference it in /etc/gitlab-runner/config.toml:"
+echo "  [runners.autoscaler]"
+echo "    plugin = \"${BINARY_NAME}\""
+echo
+echo "Verify discovery with: gitlab-runner fleeting list"

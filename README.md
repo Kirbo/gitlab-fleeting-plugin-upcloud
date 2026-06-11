@@ -6,11 +6,20 @@ A [GitLab fleeting](https://gitlab.com/gitlab-org/fleeting/fleeting) plugin that
 
 ### Quick install (recommended)
 
-The install script detects your OS and architecture automatically and downloads the correct binary from the latest release:
+The install script detects your OS and architecture automatically, downloads the correct binary from the latest release, and installs it to `/usr/local/bin/fleeting-plugin-upcloud` (override with `INSTALL_PATH=/some/path`):
 
 ```sh
 curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
 ```
+
+GitLab Runner discovers fleeting plugins by looking up the `plugin` value on `$PATH` (the binary name must follow the `fleeting-plugin-<name>` convention), so the config is simply:
+
+```toml
+[runners.autoscaler]
+  plugin = "fleeting-plugin-upcloud"
+```
+
+An absolute path (`plugin = "/usr/local/bin/fleeting-plugin-upcloud"`) also works. Paths under `~/.config/fleeting/plugins/...` are **not** required — that directory is just the download cache used by `gitlab-runner fleeting install` for plugins distributed via OCI registries.
 
 ### Manual download
 
@@ -18,8 +27,8 @@ Download the binary for your platform from the [releases page](https://gitlab.co
 
 ```sh
 # example for linux/amd64
-curl -fsSL -o /root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/fleeting-plugin-upcloud "<download-url-for-fleeting-plugin-upcloud-linux-amd64>"
-chmod +x /root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/fleeting-plugin-upcloud
+curl -fsSL -o /usr/local/bin/fleeting-plugin-upcloud "<download-url-for-fleeting-plugin-upcloud-linux-amd64>"
+chmod +x /usr/local/bin/fleeting-plugin-upcloud
 ```
 
 ### Verify it's found
@@ -30,12 +39,12 @@ gitlab-runner fleeting list
 ..should output something like:
 ```sh
 Runtime platform                                    arch=amd64 os=linux pid=12402 revision=07e534ba version=18.9.0
-runner: TCfHVcDHi, plugin: fleeting-plugin-upcloud, path: /root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/fleeting-plugin-upcloud
+runner: TCfHVcDHi, plugin: fleeting-plugin-upcloud, path: /usr/local/bin/fleeting-plugin-upcloud
 ```
 
 ### Build from source
 
-Requires Go 1.21+ and [just](https://just.systems) ([docs](https://just.systems/man/en/)).
+Requires Go 1.25+ and [just](https://just.systems) ([docs](https://just.systems/man/en/)).
 
 Install `just`:
 
@@ -211,7 +220,7 @@ shutdown_timeout = 0
     capacity_per_instance = 4
     max_use_count = 60
     max_instances = 5
-    plugin = "/root/.config/fleeting/plugins/registry.gitlab.com/gitlab-org/fleeting/plugins/fleeting-plugin-upcloud"
+    plugin = "fleeting-plugin-upcloud"
     instance_ready_command = "docker info"
     instance_acquire_timeout = "0s"
     update_interval = "0s"
