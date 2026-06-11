@@ -276,6 +276,10 @@ func TestSanitizeNamePrefix(t *testing.T) {
 		{"  spaced  ", "spaced"},
 		{"___", ""},
 		{"", ""},
+		// 60 chars → truncated to 54 so "<prefix>-<8 char suffix>" fits a 63-char label
+		{strings.Repeat("a", 60), strings.Repeat("a", 54)},
+		// truncation must not leave a trailing hyphen
+		{strings.Repeat("a", 53) + "--bb", strings.Repeat("a", 53)},
 	}
 	for _, c := range cases {
 		if got := sanitizeNamePrefix(c.in); got != c.want {
@@ -367,12 +371,32 @@ func TestIncrease_PartialFailure(t *testing.T) {
 	g := baseGroup(mock)
 	n, err := g.Increase(context.Background(), 4)
 
-	// Increase never returns an error; it logs failures and counts successes.
-	if err != nil {
-		t.Fatalf("Increase() unexpected error: %v", err)
+	// Failures are aggregated into the returned error so the taskscaler can back off.
+	if err == nil {
+		t.Fatal("Increase() expected error for partial failure, got nil")
 	}
 	if n != 2 {
 		t.Errorf("Increase() = %d, want 2 (half succeed)", n)
+	}
+}
+
+func TestIncrease_AllFail(t *testing.T) {
+	mock := newMockSvc()
+	mock.createServer = func(_ context.Context, _ *request.CreateServerRequest) (*upcloud.ServerDetails, error) {
+		return nil, errors.New("HOSTNAME_INVALID")
+	}
+
+	g := baseGroup(mock)
+	n, err := g.Increase(context.Background(), 2)
+
+	if err == nil {
+		t.Fatal("Increase() expected error when all creates fail, got nil")
+	}
+	if !strings.Contains(err.Error(), "HOSTNAME_INVALID") {
+		t.Errorf("Increase() error = %v, want it to wrap the API error", err)
+	}
+	if n != 0 {
+		t.Errorf("Increase() = %d, want 0", n)
 	}
 }
 
@@ -403,8 +427,15 @@ func TestIncrease_SetsUserData(t *testing.T) {
 
 // ─── Decrease ─────────────────────────────────────────────────────────────────
 
+// startedDetails returns server details in the "started" state, as
+// stopAndDelete checks current state before stopping.
+func startedDetails(context.Context, *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+	return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateStarted}}, nil
+}
+
 func TestDecrease_AllSucceed(t *testing.T) {
 	mock := newMockSvc()
+	mock.getServerDetails = startedDetails
 	mock.stopServer = func(_ context.Context, _ *request.StopServerRequest) (*upcloud.ServerDetails, error) {
 		return &upcloud.ServerDetails{}, nil
 	}
@@ -429,6 +460,7 @@ func TestDecrease_AllSucceed(t *testing.T) {
 
 func TestDecrease_PartialFailure(t *testing.T) {
 	mock := newMockSvc()
+	mock.getServerDetails = startedDetails
 	mock.stopServer = func(_ context.Context, r *request.StopServerRequest) (*upcloud.ServerDetails, error) {
 		if r.UUID == "uuid-bad" {
 			return nil, errors.New("stop failed")
@@ -450,6 +482,33 @@ func TestDecrease_PartialFailure(t *testing.T) {
 	}
 	if len(succeeded) != 1 || succeeded[0] != "uuid-ok" {
 		t.Errorf("Decrease() succeeded = %v, want [uuid-ok]", succeeded)
+	}
+}
+
+func TestDecrease_AlreadyStopped(t *testing.T) {
+	deleted := false
+	mock := newMockSvc()
+	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+		return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateStopped}}, nil
+	}
+	// stopServer and waitForServerState intentionally left as panics:
+	// an already-stopped server must be deleted without a stop attempt.
+	mock.deleteServerAndStorages = func(_ context.Context, _ *request.DeleteServerAndStoragesRequest) error {
+		deleted = true
+		return nil
+	}
+
+	g := baseGroup(mock)
+	succeeded, err := g.Decrease(context.Background(), []string{"uuid-stopped"})
+
+	if err != nil {
+		t.Fatalf("Decrease() unexpected error: %v", err)
+	}
+	if !deleted {
+		t.Error("Decrease() did not delete the already-stopped server")
+	}
+	if len(succeeded) != 1 {
+		t.Errorf("Decrease() succeeded = %v, want [uuid-stopped]", succeeded)
 	}
 }
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 	"regexp"
@@ -193,9 +194,12 @@ func mapServerState(s string) provider.State {
 }
 
 // Increase creates n new UpCloud servers in this group.
-// It returns the number of servers successfully requested.
+// It returns the number of servers successfully requested and an error
+// aggregating any failed creations, so the taskscaler can back off instead
+// of hot-looping on a persistently failing config.
 func (g *InstanceGroup) Increase(ctx context.Context, n int) (int, error) {
 	succeeded := 0
+	var errs []error
 	for i := 0; i < n; i++ {
 		hostname := fmt.Sprintf("%s-%s", g.NamePrefix, randomSuffix(8))
 
@@ -256,6 +260,7 @@ func (g *InstanceGroup) Increase(ctx context.Context, n int) (int, error) {
 		_, err := g.svc.CreateServer(ctx, createReq)
 		if err != nil {
 			g.log.Error("failed to create server", "hostname", hostname, "error", err)
+			errs = append(errs, fmt.Errorf("creating server %s: %w", hostname, err))
 			continue
 		}
 
@@ -263,7 +268,7 @@ func (g *InstanceGroup) Increase(ctx context.Context, n int) (int, error) {
 		succeeded++
 	}
 
-	return succeeded, nil
+	return succeeded, errors.Join(errs...)
 }
 
 // Decrease stops and deletes the specified instances in parallel.
@@ -300,22 +305,32 @@ func (g *InstanceGroup) Decrease(ctx context.Context, instances []string) ([]str
 }
 
 // stopAndDelete hard-stops a server, waits for it to reach the stopped state,
-// then deletes it along with all its storage devices.
+// then deletes it along with all its storage devices. A server that is already
+// stopped (e.g. a previous Decrease stopped it but the delete failed) is
+// deleted directly — hard-stopping a stopped server would error and leave it
+// orphaned.
 func (g *InstanceGroup) stopAndDelete(ctx context.Context, uuid string) error {
-	_, err := g.svc.StopServer(ctx, &request.StopServerRequest{
-		UUID:     uuid,
-		StopType: request.ServerStopTypeHard,
-	})
+	details, err := g.svc.GetServerDetails(ctx, &request.GetServerDetailsRequest{UUID: uuid})
 	if err != nil {
-		return fmt.Errorf("stopping server %s: %w", uuid, err)
+		return fmt.Errorf("getting server details for %s: %w", uuid, err)
 	}
 
-	_, err = g.svc.WaitForServerState(ctx, &request.WaitForServerStateRequest{
-		UUID:         uuid,
-		DesiredState: upcloud.ServerStateStopped,
-	})
-	if err != nil {
-		return fmt.Errorf("waiting for server %s to stop: %w", uuid, err)
+	if details.State != upcloud.ServerStateStopped {
+		_, err := g.svc.StopServer(ctx, &request.StopServerRequest{
+			UUID:     uuid,
+			StopType: request.ServerStopTypeHard,
+		})
+		if err != nil {
+			return fmt.Errorf("stopping server %s: %w", uuid, err)
+		}
+
+		_, err = g.svc.WaitForServerState(ctx, &request.WaitForServerStateRequest{
+			UUID:         uuid,
+			DesiredState: upcloud.ServerStateStopped,
+		})
+		if err != nil {
+			return fmt.Errorf("waiting for server %s to stop: %w", uuid, err)
+		}
 	}
 
 	if err := g.svc.DeleteServerAndStorages(ctx, &request.DeleteServerAndStoragesRequest{
@@ -394,15 +409,24 @@ func (g *InstanceGroup) Shutdown(_ context.Context) error {
 // namePrefixInvalidChars matches runs of characters not allowed in a hostname label.
 var namePrefixInvalidChars = regexp.MustCompile(`[^a-z0-9]+`)
 
+// maxNamePrefixLen keeps "<prefix>-<8 char suffix>" within the 63-character
+// RFC 1123 hostname label limit.
+const maxNamePrefixLen = 63 - 1 - 8
+
 // sanitizeNamePrefix normalizes an arbitrary name_prefix into a valid hostname
 // label fragment: lowercased, with runs of invalid characters collapsed to a
-// single hyphen and leading/trailing hyphens trimmed. UpCloud rejects hostnames
+// single hyphen, leading/trailing hyphens trimmed, and truncated so the full
+// hostname stays within the 63-character label limit. UpCloud rejects hostnames
 // that aren't RFC 1123 labels, so "CI" becomes "ci" and "My_Runner!" becomes
 // "my-runner". Returns "" if nothing valid remains.
 func sanitizeNamePrefix(s string) string {
 	s = strings.ToLower(s)
 	s = namePrefixInvalidChars.ReplaceAllString(s, "-")
-	return strings.Trim(s, "-")
+	s = strings.Trim(s, "-")
+	if len(s) > maxNamePrefixLen {
+		s = strings.TrimRight(s[:maxNamePrefixLen], "-")
+	}
+	return s
 }
 
 // randomSuffix generates a random lowercase alphanumeric string of length n.
