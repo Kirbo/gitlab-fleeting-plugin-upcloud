@@ -34,10 +34,11 @@ var newUpcloudService = func(c *client.Client) upcloudSvc {
 }
 
 const (
-	groupLabelKey      = "fleeting-group"
-	defaultPlan        = "1xCPU-2GB"
+	groupLabelKey = "fleeting-group"
+	defaultPlan   = "1xCPU-2GB"
 	// defaultStorageSize = 30
 	defaultNamePrefix  = "fleeting"
+	defaultTitlePrefix = "fleeting-plugin-upcloud"
 	defaultMaxSize     = 100
 )
 
@@ -55,11 +56,12 @@ type InstanceGroup struct {
 	Name     string `json:"name"` // unique group name; used as UpCloud label value
 
 	// Optional config
-	Plan              string `json:"plan"`               // default: "1xCPU-2GB"
-	StorageSize       int    `json:"storage_size"`       // GB, default: 30
-	StorageTier       string `json:"storage_tier"`       // "maxiops" or "standard"; default: inherit from template
-	NamePrefix        string `json:"name_prefix"`        // hostname prefix, default: "fleeting"
-	MaxSize           int    `json:"max_size"`           // default: 100
+	Plan              string `json:"plan"`                // default: "1xCPU-2GB"
+	StorageSize       int    `json:"storage_size"`        // GB, default: 30
+	StorageTier       string `json:"storage_tier"`        // "maxiops" or "standard"; default: inherit from template
+	NamePrefix        string `json:"name_prefix"`         // hostname prefix, default: "fleeting"
+	TitlePrefix       string `json:"title_prefix"`        // server title prefix, default: "fleeting-plugin-upcloud"
+	MaxSize           int    `json:"max_size"`            // default: 100
 	UsePrivateNetwork bool   `json:"use_private_network"` // default: false (use public IP)
 	UserData          string `json:"user_data"`           // optional: URL or script body for server initialization
 
@@ -92,6 +94,9 @@ func (g *InstanceGroup) validate() error {
 	// }
 	if g.NamePrefix == "" {
 		g.NamePrefix = defaultNamePrefix
+	}
+	if g.TitlePrefix == "" {
+		g.TitlePrefix = defaultTitlePrefix
 	}
 	if g.MaxSize == 0 {
 		g.MaxSize = defaultMaxSize
@@ -217,7 +222,7 @@ func (g *InstanceGroup) Increase(ctx context.Context, n int) (int, error) {
 
 		createReq := &request.CreateServerRequest{
 			Hostname: hostname,
-			Title:    fmt.Sprintf("fleeting-plugin-upcloud - %s", hostname),
+			Title:    fmt.Sprintf("%s - %s", g.TitlePrefix, hostname),
 			Plan:     g.Plan,
 			Zone:     g.Zone,
 			Metadata: upcloud.True,

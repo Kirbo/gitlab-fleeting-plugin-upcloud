@@ -270,6 +270,7 @@ All fields go under `[runners.autoscaler.plugin_config]`.
 | `storage_tier` | no | (from template) | `maxiops` or `standard` |
 | `storage_size` | no | (from template) | Storage size in GB |
 | `name_prefix` | no | `fleeting` | Prefix for generated hostnames |
+| `title_prefix` | no | `fleeting-plugin-upcloud` | Prefix for generated server titles |
 | `max_size` | no | `100` | Maximum number of concurrent instances |
 | `use_private_network` | no | `false` | Connect via private IP instead of public |
 | `user_data` | no | — | URL or inline script for cloud-init on first boot |

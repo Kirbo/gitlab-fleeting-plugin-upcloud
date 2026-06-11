@@ -63,13 +63,31 @@ func (m *mockSvc) GetServerDetails(ctx context.Context, r *request.GetServerDeta
 func newMockSvc() *mockSvc {
 	panic := func(name string) { panic("unexpected call to mockSvc." + name) }
 	return &mockSvc{
-		getAccount:              func(context.Context) (*upcloud.Account, error) { panic("GetAccount"); return nil, nil },
-		getServersWithFilters:   func(context.Context, *request.GetServersWithFiltersRequest) (*upcloud.Servers, error) { panic("GetServersWithFilters"); return nil, nil },
-		createServer:            func(context.Context, *request.CreateServerRequest) (*upcloud.ServerDetails, error) { panic("CreateServer"); return nil, nil },
-		stopServer:              func(context.Context, *request.StopServerRequest) (*upcloud.ServerDetails, error) { panic("StopServer"); return nil, nil },
-		waitForServerState:      func(context.Context, *request.WaitForServerStateRequest) (*upcloud.ServerDetails, error) { panic("WaitForServerState"); return nil, nil },
-		deleteServerAndStorages: func(context.Context, *request.DeleteServerAndStoragesRequest) error { panic("DeleteServerAndStorages"); return nil },
-		getServerDetails:        func(context.Context, *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) { panic("GetServerDetails"); return nil, nil },
+		getAccount: func(context.Context) (*upcloud.Account, error) { panic("GetAccount"); return nil, nil },
+		getServersWithFilters: func(context.Context, *request.GetServersWithFiltersRequest) (*upcloud.Servers, error) {
+			panic("GetServersWithFilters")
+			return nil, nil
+		},
+		createServer: func(context.Context, *request.CreateServerRequest) (*upcloud.ServerDetails, error) {
+			panic("CreateServer")
+			return nil, nil
+		},
+		stopServer: func(context.Context, *request.StopServerRequest) (*upcloud.ServerDetails, error) {
+			panic("StopServer")
+			return nil, nil
+		},
+		waitForServerState: func(context.Context, *request.WaitForServerStateRequest) (*upcloud.ServerDetails, error) {
+			panic("WaitForServerState")
+			return nil, nil
+		},
+		deleteServerAndStorages: func(context.Context, *request.DeleteServerAndStoragesRequest) error {
+			panic("DeleteServerAndStorages")
+			return nil
+		},
+		getServerDetails: func(context.Context, *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+			panic("GetServerDetails")
+			return nil, nil
+		},
 	}
 }
 
@@ -91,19 +109,21 @@ func baseGroup(svc *mockSvc) *InstanceGroup {
 
 func TestValidate(t *testing.T) {
 	tests := []struct {
-		name        string
-		g           InstanceGroup
-		wantErr     bool
-		wantPlan    string
-		wantPrefix  string
-		wantMaxSize int
+		name            string
+		g               InstanceGroup
+		wantErr         bool
+		wantPlan        string
+		wantPrefix      string
+		wantTitlePrefix string
+		wantMaxSize     int
 	}{
 		{
-			name:        "token auth - all required fields",
-			g:           InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n"},
-			wantPlan:    defaultPlan,
-			wantPrefix:  defaultNamePrefix,
-			wantMaxSize: defaultMaxSize,
+			name:            "token auth - all required fields",
+			g:               InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n"},
+			wantPlan:        defaultPlan,
+			wantPrefix:      defaultNamePrefix,
+			wantTitlePrefix: defaultTitlePrefix,
+			wantMaxSize:     defaultMaxSize,
 		},
 		{
 			name: "username+password auth",
@@ -153,6 +173,13 @@ func TestValidate(t *testing.T) {
 			wantMaxSize: defaultMaxSize,
 		},
 		{
+			name:            "explicit title prefix preserved",
+			g:               InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", TitlePrefix: "ci-runner"},
+			wantPlan:        defaultPlan,
+			wantTitlePrefix: "ci-runner",
+			wantMaxSize:     defaultMaxSize,
+		},
+		{
 			name:        "explicit max size preserved",
 			g:           InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", MaxSize: 5},
 			wantPlan:    defaultPlan,
@@ -174,6 +201,9 @@ func TestValidate(t *testing.T) {
 			}
 			if tc.wantPrefix != "" && tc.g.NamePrefix != tc.wantPrefix {
 				t.Errorf("NamePrefix = %q, want %q", tc.g.NamePrefix, tc.wantPrefix)
+			}
+			if tc.wantTitlePrefix != "" && tc.g.TitlePrefix != tc.wantTitlePrefix {
+				t.Errorf("TitlePrefix = %q, want %q", tc.g.TitlePrefix, tc.wantTitlePrefix)
 			}
 			if tc.wantMaxSize != 0 && tc.g.MaxSize != tc.wantMaxSize {
 				t.Errorf("MaxSize = %d, want %d", tc.g.MaxSize, tc.wantMaxSize)
