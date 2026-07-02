@@ -116,8 +116,11 @@ test:
       LDFLAGS="-X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${COMMIT} -X main.buildDate=${DATE}"
       GOOS=${TARGET_OS} GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-amd64/${BINARY_NAME}" .
       GOOS=${TARGET_OS} GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-arm64/${BINARY_NAME}" .
+    # Upload only for releasable versions: BUILD_VERSION falls back to the
+    # commit SHA (always set), which used to push SHA-versioned binaries to
+    # the package registry on every default-branch push.
     - |
-      if [ -n "${BUILD_VERSION}" ]; then
+      if [ -n "${VERSION}" ]; then
         for GOARCH in amd64 arm64; do
           ASSET="${BINARY_NAME}-${TARGET_OS}-${GOARCH}"
           BIN="bin/${TARGET_OS}-${GOARCH}/${BINARY_NAME}"
@@ -126,12 +129,14 @@ test:
           curl --fail --silent --show-error \
             --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
             --upload-file "${BIN}" \
-            "${PACKAGE_REGISTRY_URL}/${BUILD_VERSION}/${ASSET}"
+            "${PACKAGE_REGISTRY_URL}/${VERSION}/${ASSET}"
           curl --fail --silent --show-error \
             --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
             --upload-file "${BIN}.sha256" \
-            "${PACKAGE_REGISTRY_URL}/${BUILD_VERSION}/${ASSET}.sha256"
+            "${PACKAGE_REGISTRY_URL}/${VERSION}/${ASSET}.sha256"
         done
+      else
+        echo "VERSION is empty — no releasable commits. Skipping upload."
       fi
 
 build-linux:
