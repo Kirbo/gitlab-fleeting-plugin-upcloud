@@ -713,3 +713,16 @@ func TestInit_Success(t *testing.T) {
 		t.Errorf("ProviderInfo.ID = %q, expected to contain zone", info.ID)
 	}
 }
+
+// ─── Suspend / Resume ─────────────────────────────────────────────────────────
+
+func TestSuspendResume_NotSupported(t *testing.T) {
+	g := baseGroup(newMockSvc())
+
+	if _, err := g.Suspend(context.Background(), []string{"uuid-1"}); !errors.Is(err, provider.ErrCapabilityNotSupported) {
+		t.Errorf("Suspend() error = %v, want ErrCapabilityNotSupported", err)
+	}
+	if _, err := g.Resume(context.Background(), []string{"uuid-1"}); !errors.Is(err, provider.ErrCapabilityNotSupported) {
+		t.Errorf("Resume() error = %v, want ErrCapabilityNotSupported", err)
+	}
+}

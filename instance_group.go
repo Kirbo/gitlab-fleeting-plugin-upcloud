@@ -401,6 +401,18 @@ func (g *InstanceGroup) Heartbeat(ctx context.Context, id string) error {
 	return nil
 }
 
+// Suspend is not supported: UpCloud has no suspend-to-disk primitive that
+// fits fleeting's suspend/resume lifecycle, and the plugin does not declare
+// provider.CapabilitySuspendResume.
+func (g *InstanceGroup) Suspend(_ context.Context, _ []string) ([]string, error) {
+	return nil, provider.ErrCapabilityNotSupported
+}
+
+// Resume is not supported; see Suspend.
+func (g *InstanceGroup) Resume(_ context.Context, _ []string) ([]string, error) {
+	return nil, provider.ErrCapabilityNotSupported
+}
+
 // Shutdown performs cleanup before the plugin exits.
 func (g *InstanceGroup) Shutdown(_ context.Context) error {
 	return nil

@@ -1,7 +1,7 @@
 # Developer toolchain — install everything with `mise install`
 [tools]
 # Build
-go = "1.25"
+go = "1.26"
 just = "latest"
 
 # Used by the template-creation workflow in README.md
