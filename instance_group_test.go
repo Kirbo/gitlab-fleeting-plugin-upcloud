@@ -448,7 +448,9 @@ func TestIncrease_SetsUserData(t *testing.T) {
 
 	g := baseGroup(mock)
 	g.UserData = "https://example.com/init.sh"
-	g.Increase(context.Background(), 1)
+	if _, err := g.Increase(context.Background(), 1); err != nil {
+		t.Fatalf("Increase() unexpected error: %v", err)
+	}
 
 	if got != g.UserData {
 		t.Errorf("CreateServer UserData = %q, want %q", got, g.UserData)

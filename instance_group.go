@@ -145,8 +145,8 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	}
 
 	// Derive SSH public key from the private key provided via connector_config.key_path
-	if len(settings.ConnectorConfig.Key) > 0 {
-		signer, err := ssh.ParsePrivateKey(settings.ConnectorConfig.Key)
+	if len(settings.Key) > 0 {
+		signer, err := ssh.ParsePrivateKey(settings.Key)
 		if err != nil {
 			return provider.ProviderInfo{}, fmt.Errorf("parsing SSH private key from connector_config: %w", err)
 		}
@@ -301,7 +301,7 @@ func (g *InstanceGroup) createServer(ctx context.Context) error {
 
 	if g.publicKey != "" {
 		createReq.LoginUser = &request.LoginUser{
-			Username: g.settings.ConnectorConfig.Username,
+			Username: g.settings.Username,
 			SSHKeys:  request.SSHKeySlice{g.publicKey},
 		}
 	}
