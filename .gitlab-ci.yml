@@ -68,7 +68,7 @@ bump-version:
       - build.env
     reports:
       dotenv: build.env
-    expire_in: never
+    expire_in: 1 week
   script:
     - semantic-release --version-file --changelog CHANGELOG.md --dry || true
     - export VERSION=$(cat .version-unreleased 2>/dev/null || echo "")
@@ -96,14 +96,13 @@ test:
 # Build (cross-compiled; darwin binaries are unsigned — sign locally after download)
 # ──────────────────────────────────────────────
 
+# No `changes:` filter: semantic-release considers any fix:/feat: commit
+# releasable (including ones that only touch scripts or CI), so build+release
+# must run whenever bump-version computes a VERSION.
 .build-common:
   stage: build
   rules:
     - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
-      changes:
-        - "**/*.go"
-        - go.mod
-        - go.sum
   needs:
     - job: bump-version
       artifacts: true
@@ -160,10 +159,6 @@ create-release:
   cache: []
   rules:
     - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
-      changes:
-        - "**/*.go"
-        - go.mod
-        - go.sum
   needs:
     - job: bump-version
       artifacts: true
