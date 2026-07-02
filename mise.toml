@@ -2,8 +2,63 @@
 [tools]
 # Build
 go = "1.26"
-just = "latest"
 
 # Used by the template-creation workflow in README.md
 jq = "latest"
 upctl = "latest"
+
+# Tasks — run with `mise run <task>` (list them with `mise tasks`).
+# Version metadata comes from scripts/ldflags.sh.
+
+[tasks.build]
+description = "Build the plugin binary into bin/ (ad-hoc signs it on macOS)"
+run = """
+go build -ldflags "$(scripts/ldflags.sh)" -o bin/fleeting-plugin-upcloud .
+[ "$(uname -s)" != "Darwin" ] || codesign --sign - bin/fleeting-plugin-upcloud
+"""
+
+[tasks.deploy]
+description = "Build, sign, and deploy directly to the runner plugins directory"
+depends = ["build"]
+run = "cp bin/fleeting-plugin-upcloud ~/.gitlab-runner/plugins/fleeting-plugin-upcloud"
+
+[tasks.build-linux]
+description = "Build for Linux (amd64 and arm64) into bin/linux-<arch>/"
+run = """
+GOOS=linux GOARCH=amd64 go build -ldflags "$(scripts/ldflags.sh)" -o bin/linux-amd64/fleeting-plugin-upcloud .
+GOOS=linux GOARCH=arm64 go build -ldflags "$(scripts/ldflags.sh)" -o bin/linux-arm64/fleeting-plugin-upcloud .
+"""
+
+[tasks.build-mac]
+description = "Build for macOS (amd64 and arm64) into bin/darwin-<arch>/ (ad-hoc signs on a macOS host)"
+run = """
+GOOS=darwin GOARCH=amd64 go build -ldflags "$(scripts/ldflags.sh)" -o bin/darwin-amd64/fleeting-plugin-upcloud .
+GOOS=darwin GOARCH=arm64 go build -ldflags "$(scripts/ldflags.sh)" -o bin/darwin-arm64/fleeting-plugin-upcloud .
+[ "$(uname -s)" != "Darwin" ] || codesign --sign - bin/darwin-amd64/fleeting-plugin-upcloud
+[ "$(uname -s)" != "Darwin" ] || codesign --sign - bin/darwin-arm64/fleeting-plugin-upcloud
+"""
+
+[tasks.build-all]
+description = "Build for all common platforms into bin/<os>-<arch>/"
+depends = ["build-linux", "build-mac"]
+
+# Built with an explicit -o: `go install` would name the binary after the
+# module path (gitlab-fleeting-plugin-upcloud), breaking runner discovery,
+# which requires the fleeting-plugin-<name> convention.
+[tasks.install]
+description = "Install the binary to $GOPATH/bin (makes it available on $PATH)"
+run = """
+go build -ldflags "$(scripts/ldflags.sh)" -o "$(go env GOPATH)/bin/fleeting-plugin-upcloud" .
+"""
+
+[tasks.test]
+description = "Run tests"
+run = "go test ./..."
+
+[tasks.vet]
+description = "Run go vet"
+run = "go vet ./..."
+
+[tasks.clean]
+description = "Remove build artifacts"
+run = "rm -rf bin/"

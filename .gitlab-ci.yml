@@ -89,8 +89,8 @@ test:
   stage: test
   needs: []
   script:
-    - just vet
-    - just test
+    - mise run vet
+    - mise run test
 
 # ──────────────────────────────────────────────
 # Build (cross-compiled; darwin binaries are unsigned — sign locally after download)

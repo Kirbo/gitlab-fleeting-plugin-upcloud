@@ -44,7 +44,7 @@ runner: TCfHVcDHi, plugin: fleeting-plugin-upcloud, path: /usr/local/bin/fleetin
 
 ### Build from source
 
-The toolchain (Go, [just](https://just.systems), plus `jq` and `upctl` used in the workflows below) is managed with [mise](https://mise.jdx.dev/) and pinned in [`mise.toml`](mise.toml). Install [mise](https://mise.jdx.dev/getting-started.html), then from the repository root:
+The toolchain (Go, plus `jq` and `upctl` used in the workflows below) and the build tasks are managed with [mise](https://mise.jdx.dev/) and defined in [`mise.toml`](mise.toml). Install [mise](https://mise.jdx.dev/getting-started.html), then from the repository root:
 
 ```sh
 mise trust   # approve this repo's mise.toml (first time only)
@@ -53,15 +53,17 @@ mise install
 
 ```sh
 # Build for the current machine (macOS: also ad-hoc signs the binary)
-just build
+mise run build
 
 # Build for all platforms (linux/darwin × amd64/arm64)
-just build-all
+mise run build-all
 
 # Or build per platform
-just build-linux
-just build-mac
+mise run build-linux
+mise run build-mac
 ```
+
+List all available tasks (test, vet, install, deploy, clean, …) with `mise tasks`.
 
 ## Creating a custom UpCloud template
 
