@@ -190,7 +190,7 @@ shutdown_timeout = 0
   url = "https://gitlab.com"
   id = 0
   token = "<your GitLab Runner Token>"
-  token_obtained_at = 2026-02-24T11:23:22Z
+  token_obtained_at = 2026-01-01T00:00:00Z # placeholder — gitlab-runner register fills this in
   token_expires_at = 0001-01-01T00:00:00Z
   executor = "docker-autoscaler"
 
