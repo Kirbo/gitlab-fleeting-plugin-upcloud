@@ -21,9 +21,9 @@ go build -ldflags "$(scripts/ldflags.sh)" -o bin/fleeting-plugin-upcloud .
 """
 
 [tasks.deploy]
-description = "Build, sign, and deploy directly to the runner plugins directory"
+description = "Build, sign, and install to /usr/local/bin (where config.toml finds it by name)"
 depends = ["build"]
-run = "cp bin/fleeting-plugin-upcloud ~/.gitlab-runner/plugins/fleeting-plugin-upcloud"
+run = "sudo install -m 0755 bin/fleeting-plugin-upcloud /usr/local/bin/fleeting-plugin-upcloud"
 
 [tasks.build-linux]
 description = "Build for Linux (amd64 and arm64) into bin/linux-<arch>/"
