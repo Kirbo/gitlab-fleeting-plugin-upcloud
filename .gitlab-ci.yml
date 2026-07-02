@@ -120,11 +120,18 @@ test:
     - |
       if [ -n "${BUILD_VERSION}" ]; then
         for GOARCH in amd64 arm64; do
-          echo "Uploading ${BINARY_NAME}-${TARGET_OS}-${GOARCH}..."
+          ASSET="${BINARY_NAME}-${TARGET_OS}-${GOARCH}"
+          BIN="bin/${TARGET_OS}-${GOARCH}/${BINARY_NAME}"
+          sha256sum "${BIN}" | awk -v name="${ASSET}" '{print $1 "  " name}' > "${BIN}.sha256"
+          echo "Uploading ${ASSET}..."
           curl --fail --silent --show-error \
             --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-            --upload-file "bin/${TARGET_OS}-${GOARCH}/${BINARY_NAME}" \
-            "${PACKAGE_REGISTRY_URL}/${BUILD_VERSION}/${BINARY_NAME}-${TARGET_OS}-${GOARCH}"
+            --upload-file "${BIN}" \
+            "${PACKAGE_REGISTRY_URL}/${BUILD_VERSION}/${ASSET}"
+          curl --fail --silent --show-error \
+            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+            --upload-file "${BIN}.sha256" \
+            "${PACKAGE_REGISTRY_URL}/${BUILD_VERSION}/${ASSET}.sha256"
         done
       fi
 
@@ -177,6 +184,10 @@ create-release:
         --ref "${CI_COMMIT_SHA}" \
         --description "CHANGELOG.md" \
         --assets-link "{\"name\":\"${BINARY_NAME}-linux-amd64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-amd64\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"${BINARY_NAME}-linux-amd64.sha256\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-amd64.sha256\",\"link_type\":\"other\"}" \
         --assets-link "{\"name\":\"${BINARY_NAME}-linux-arm64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-arm64\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"${BINARY_NAME}-linux-arm64.sha256\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-arm64.sha256\",\"link_type\":\"other\"}" \
         --assets-link "{\"name\":\"${BINARY_NAME}-darwin-amd64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-amd64\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-arm64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-arm64\",\"link_type\":\"package\"}"
+        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-amd64.sha256\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-amd64.sha256\",\"link_type\":\"other\"}" \
+        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-arm64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-arm64\",\"link_type\":\"package\"}" \
+        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-arm64.sha256\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-arm64.sha256\",\"link_type\":\"other\"}"

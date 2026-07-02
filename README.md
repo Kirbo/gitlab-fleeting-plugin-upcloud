@@ -6,7 +6,7 @@ A [GitLab fleeting](https://gitlab.com/gitlab-org/fleeting/fleeting) plugin that
 
 ### Quick install (recommended)
 
-The install script detects your OS and architecture automatically, downloads the correct binary from the latest release, and installs it to `/usr/local/bin/fleeting-plugin-upcloud` (override with `INSTALL_PATH=/some/path`):
+The install script detects your OS and architecture automatically, downloads the correct binary from the latest release, verifies its SHA256 checksum against the published `.sha256` release asset, and installs it to `/usr/local/bin/fleeting-plugin-upcloud` (override with `INSTALL_PATH=/some/path`):
 
 ```sh
 curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
