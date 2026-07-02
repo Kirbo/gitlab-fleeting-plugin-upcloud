@@ -1,4 +1,4 @@
-module gitlab.com/kirbo/fleeting-plugin-upcloud
+module gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud
 
 go 1.26.0
 
