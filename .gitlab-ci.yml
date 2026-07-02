@@ -90,6 +90,7 @@ test:
   needs: []
   script:
     - mise run vet
+    - mise run lint
     - mise run test
 
 # ──────────────────────────────────────────────

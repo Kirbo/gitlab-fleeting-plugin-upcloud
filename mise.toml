@@ -3,6 +3,9 @@
 # Build
 go = "1.26"
 
+# Lint
+golangci-lint = "latest"
+
 # Used by the template-creation workflow in README.md
 jq = "latest"
 upctl = "latest"
@@ -58,6 +61,10 @@ run = "go test ./..."
 [tasks.vet]
 description = "Run go vet"
 run = "go vet ./..."
+
+[tasks.lint]
+description = "Run golangci-lint"
+run = "golangci-lint run ./..."
 
 [tasks.clean]
 description = "Remove build artifacts"
