@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
+	"net/http"
 	"regexp"
 	"strings"
 	"sync"
@@ -37,12 +38,20 @@ var newUpcloudService = func(c *client.Client) upcloudSvc {
 }
 
 const (
-	groupLabelKey = "fleeting-group"
-	defaultPlan   = "1xCPU-2GB"
-	// defaultStorageSize = 30
+	groupLabelKey      = "fleeting-group"
+	defaultPlan        = "1xCPU-2GB"
 	defaultNamePrefix  = "fleeting"
 	defaultTitlePrefix = "fleeting-plugin-upcloud"
 	defaultMaxSize     = 100
+
+	// maxConcurrentRequests bounds parallel UpCloud API calls in Increase and
+	// Decrease so a large scale event doesn't trip API rate limits.
+	maxConcurrentRequests = 10
+
+	// serverStopTimeout bounds how long stopAndDelete waits for a server to
+	// reach the stopped state. The caller's ctx may have no deadline, and the
+	// SDK's WaitForServerState polls until its ctx is done.
+	serverStopTimeout = 5 * time.Minute
 )
 
 // InstanceGroup implements provider.InstanceGroup for UpCloud.
@@ -60,7 +69,7 @@ type InstanceGroup struct {
 
 	// Optional config
 	Plan              string `json:"plan"`                // default: "1xCPU-2GB"
-	StorageSize       int    `json:"storage_size"`        // GB, default: 30
+	StorageSize       int    `json:"storage_size"`        // GB, 0 = inherit from template
 	StorageTier       string `json:"storage_tier"`        // "maxiops" or "standard"; default: inherit from template
 	NamePrefix        string `json:"name_prefix"`         // hostname prefix, default: "fleeting"
 	TitlePrefix       string `json:"title_prefix"`        // server title prefix, default: "fleeting-plugin-upcloud"
@@ -92,9 +101,6 @@ func (g *InstanceGroup) validate() error {
 	if g.Plan == "" {
 		g.Plan = defaultPlan
 	}
-	// if g.StorageSize == 0 {
-	// 	g.StorageSize = defaultStorageSize
-	// }
 	if g.NamePrefix == "" {
 		g.NamePrefix = defaultNamePrefix
 	}
@@ -107,6 +113,11 @@ func (g *InstanceGroup) validate() error {
 	}
 	if g.TitlePrefix == "" {
 		g.TitlePrefix = defaultTitlePrefix
+	}
+	// UpCloud caps server titles at 255 characters; truncate the prefix so
+	// "<prefix> - <hostname>" always fits instead of failing every create.
+	if len(g.TitlePrefix) > maxTitlePrefixLen {
+		g.TitlePrefix = strings.TrimRight(g.TitlePrefix[:maxTitlePrefixLen], " ")
 	}
 	if g.MaxSize == 0 {
 		g.MaxSize = defaultMaxSize
@@ -181,116 +192,156 @@ func (g *InstanceGroup) Update(ctx context.Context, fn func(instance string, sta
 }
 
 // mapServerState converts an UpCloud server state string to a provider.State.
+// Stopped and errored servers still exist (and bill for storage), so they are
+// reported as StateDeleting rather than StateDeleted: the taskscaler keeps
+// tracking them and retries Decrease until the server is actually gone.
+// Reporting them as deleted would drop them from tracking and leak them
+// forever (e.g. when a Decrease stopped a server but the delete failed).
 func mapServerState(s string) provider.State {
 	switch s {
 	case upcloud.ServerStateStarted:
 		return provider.StateRunning
 	case upcloud.ServerStateStopped, upcloud.ServerStateError:
-		return provider.StateDeleted
+		return provider.StateDeleting
 	default:
 		// "new", "maintenance", etc.
 		return provider.StateCreating
 	}
 }
 
-// Increase creates n new UpCloud servers in this group.
-// It returns the number of servers successfully requested and an error
-// aggregating any failed creations, so the taskscaler can back off instead
-// of hot-looping on a persistently failing config.
+// Increase creates n new UpCloud servers in this group in parallel (bounded
+// by maxConcurrentRequests). It returns the number of servers successfully
+// requested and an error aggregating any failed creations, so the taskscaler
+// can back off instead of hot-looping on a persistently failing config.
 func (g *InstanceGroup) Increase(ctx context.Context, n int) (int, error) {
-	succeeded := 0
-	var errs []error
+	var (
+		mu        sync.Mutex
+		succeeded int
+		errs      []error
+		wg        sync.WaitGroup
+	)
+	sem := make(chan struct{}, maxConcurrentRequests)
+
 	for i := 0; i < n; i++ {
-		hostname := fmt.Sprintf("%s-%s", g.NamePrefix, randomSuffix(8))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
 
-		storageDevices := request.CreateServerStorageDeviceSlice{
-			{
-				Action:  request.CreateServerStorageDeviceActionClone,
-				Storage: g.Template,
-				Title:   "disk1",
-				Size:    g.StorageSize,
-				Tier:    g.StorageTier, // empty = inherit tier from template
-			},
-		}
-
-		networking := &request.CreateServerNetworking{
-			Interfaces: request.CreateServerInterfaceSlice{
-				{
-					IPAddresses: request.CreateServerIPAddressSlice{
-						{Family: upcloud.IPAddressFamilyIPv4},
-					},
-					Type: upcloud.NetworkTypePublic,
-				},
-			},
-		}
-
-		if g.UsePrivateNetwork {
-			networking.Interfaces = append(networking.Interfaces, request.CreateServerInterface{
-				IPAddresses: request.CreateServerIPAddressSlice{
-					{Family: upcloud.IPAddressFamilyIPv4},
-				},
-				Type: upcloud.NetworkTypePrivate,
-			})
-		}
-
-		createReq := &request.CreateServerRequest{
-			Hostname: hostname,
-			Title:    fmt.Sprintf("%s - %s", g.TitlePrefix, hostname),
-			Plan:     g.Plan,
-			Zone:     g.Zone,
-			Metadata: upcloud.True,
-			Labels: &upcloud.LabelSlice{
-				{Key: groupLabelKey, Value: g.Name},
-			},
-			StorageDevices: storageDevices,
-			Networking:     networking,
-		}
-
-		if g.publicKey != "" {
-			createReq.LoginUser = &request.LoginUser{
-				Username: g.settings.ConnectorConfig.Username,
-				SSHKeys:  request.SSHKeySlice{g.publicKey},
+			// Don't start new creates once the caller has given up.
+			if err := ctx.Err(); err != nil {
+				mu.Lock()
+				errs = append(errs, err)
+				mu.Unlock()
+				return
 			}
-		}
 
-		if g.UserData != "" {
-			createReq.UserData = g.UserData
-		}
-
-		_, err := g.svc.CreateServer(ctx, createReq)
-		if err != nil {
-			g.log.Error("failed to create server", "hostname", hostname, "error", err)
-			errs = append(errs, fmt.Errorf("creating server %s: %w", hostname, err))
-			continue
-		}
-
-		g.log.Info("created server", "hostname", hostname)
-		succeeded++
+			err := g.createServer(ctx)
+			mu.Lock()
+			if err != nil {
+				errs = append(errs, err)
+			} else {
+				succeeded++
+			}
+			mu.Unlock()
+		}()
 	}
 
+	wg.Wait()
 	return succeeded, errors.Join(errs...)
 }
 
-// Decrease stops and deletes the specified instances in parallel.
-// It returns the UUIDs of instances that were successfully removed.
+// createServer provisions a single server in this group.
+func (g *InstanceGroup) createServer(ctx context.Context) error {
+	hostname := fmt.Sprintf("%s-%s", g.NamePrefix, randomSuffix(8))
+
+	storageDevices := request.CreateServerStorageDeviceSlice{
+		{
+			Action:  request.CreateServerStorageDeviceActionClone,
+			Storage: g.Template,
+			Title:   "disk1",
+			Size:    g.StorageSize,
+			Tier:    g.StorageTier, // empty = inherit tier from template
+		},
+	}
+
+	networking := &request.CreateServerNetworking{
+		Interfaces: request.CreateServerInterfaceSlice{
+			{
+				IPAddresses: request.CreateServerIPAddressSlice{
+					{Family: upcloud.IPAddressFamilyIPv4},
+				},
+				Type: upcloud.NetworkTypePublic,
+			},
+		},
+	}
+
+	if g.UsePrivateNetwork {
+		networking.Interfaces = append(networking.Interfaces, request.CreateServerInterface{
+			IPAddresses: request.CreateServerIPAddressSlice{
+				{Family: upcloud.IPAddressFamilyIPv4},
+			},
+			Type: upcloud.NetworkTypePrivate,
+		})
+	}
+
+	createReq := &request.CreateServerRequest{
+		Hostname: hostname,
+		Title:    fmt.Sprintf("%s - %s", g.TitlePrefix, hostname),
+		Plan:     g.Plan,
+		Zone:     g.Zone,
+		Metadata: upcloud.True,
+		Labels: &upcloud.LabelSlice{
+			{Key: groupLabelKey, Value: g.Name},
+		},
+		StorageDevices: storageDevices,
+		Networking:     networking,
+	}
+
+	if g.publicKey != "" {
+		createReq.LoginUser = &request.LoginUser{
+			Username: g.settings.ConnectorConfig.Username,
+			SSHKeys:  request.SSHKeySlice{g.publicKey},
+		}
+	}
+
+	if g.UserData != "" {
+		createReq.UserData = g.UserData
+	}
+
+	if _, err := g.svc.CreateServer(ctx, createReq); err != nil {
+		g.log.Error("failed to create server", "hostname", hostname, "error", err)
+		return fmt.Errorf("creating server %s: %w", hostname, err)
+	}
+
+	g.log.Info("created server", "hostname", hostname)
+	return nil
+}
+
+// Decrease stops and deletes the specified instances in parallel (bounded by
+// maxConcurrentRequests). It returns the UUIDs of instances that were
+// successfully removed and an error aggregating any failed removals.
 func (g *InstanceGroup) Decrease(ctx context.Context, instances []string) ([]string, error) {
 	var (
 		mu        sync.Mutex
 		succeeded []string
-		firstErr  error
+		errs      []error
 		wg        sync.WaitGroup
 	)
+	sem := make(chan struct{}, maxConcurrentRequests)
 
 	for _, id := range instances {
 		wg.Add(1)
 		go func(uuid string) {
 			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
 			if err := g.stopAndDelete(ctx, uuid); err != nil {
 				g.log.Error("failed to remove instance", "uuid", uuid, "error", err)
 				mu.Lock()
-				if firstErr == nil {
-					firstErr = err
-				}
+				errs = append(errs, err)
 				mu.Unlock()
 				return
 			}
@@ -301,21 +352,24 @@ func (g *InstanceGroup) Decrease(ctx context.Context, instances []string) ([]str
 	}
 
 	wg.Wait()
-	return succeeded, firstErr
+	return succeeded, errors.Join(errs...)
 }
 
 // stopAndDelete hard-stops a server, waits for it to reach the stopped state,
 // then deletes it along with all its storage devices. A server that is already
-// stopped (e.g. a previous Decrease stopped it but the delete failed) is
-// deleted directly — hard-stopping a stopped server would error and leave it
-// orphaned.
+// stopped (e.g. a previous Decrease stopped it but the delete failed) or in
+// the error state is deleted directly — hard-stopping it would error and
+// leave it orphaned.
 func (g *InstanceGroup) stopAndDelete(ctx context.Context, uuid string) error {
 	details, err := g.svc.GetServerDetails(ctx, &request.GetServerDetailsRequest{UUID: uuid})
 	if err != nil {
 		return fmt.Errorf("getting server details for %s: %w", uuid, err)
 	}
 
-	if details.State != upcloud.ServerStateStopped {
+	switch details.State {
+	case upcloud.ServerStateStopped, upcloud.ServerStateError:
+		// Deletable as-is; a stop attempt would fail.
+	default:
 		_, err := g.svc.StopServer(ctx, &request.StopServerRequest{
 			UUID:     uuid,
 			StopType: request.ServerStopTypeHard,
@@ -324,7 +378,12 @@ func (g *InstanceGroup) stopAndDelete(ctx context.Context, uuid string) error {
 			return fmt.Errorf("stopping server %s: %w", uuid, err)
 		}
 
-		_, err = g.svc.WaitForServerState(ctx, &request.WaitForServerStateRequest{
+		// The SDK polls until ctx is done; the caller's ctx may have no
+		// deadline, so bound the wait explicitly.
+		waitCtx, cancel := context.WithTimeout(ctx, serverStopTimeout)
+		defer cancel()
+
+		_, err = g.svc.WaitForServerState(waitCtx, &request.WaitForServerStateRequest{
 			UUID:         uuid,
 			DesiredState: upcloud.ServerStateStopped,
 		})
@@ -378,8 +437,12 @@ func (g *InstanceGroup) ConnectInfo(ctx context.Context, id string) (provider.Co
 		}
 	}
 
-	if g.UsePrivateNetwork && info.InternalAddr != "" {
-		info.ExternalAddr = info.InternalAddr
+	if g.UsePrivateNetwork {
+		if info.InternalAddr != "" {
+			info.ExternalAddr = info.InternalAddr
+		} else {
+			g.log.Warn("use_private_network is set but instance has no private IPv4 address; falling back to public address", "uuid", id)
+		}
 	}
 
 	return info, nil
@@ -389,7 +452,12 @@ func (g *InstanceGroup) ConnectInfo(ctx context.Context, id string) (provider.Co
 func (g *InstanceGroup) Heartbeat(ctx context.Context, id string) error {
 	details, err := g.svc.GetServerDetails(ctx, &request.GetServerDetailsRequest{UUID: id})
 	if err != nil {
-		// Treat transient API errors as healthy to avoid premature instance replacement
+		// A 404 is definitive: the server no longer exists and must be replaced.
+		var problem *upcloud.Problem
+		if errors.As(err, &problem) && problem.Status == http.StatusNotFound {
+			return fmt.Errorf("server %s not found: %w", id, err)
+		}
+		// Treat other (transient) API errors as healthy to avoid premature instance replacement
 		g.log.Warn("heartbeat API error (treating as healthy)", "uuid", id, "error", err)
 		return nil
 	}
@@ -425,6 +493,10 @@ var namePrefixInvalidChars = regexp.MustCompile(`[^a-z0-9]+`)
 // RFC 1123 hostname label limit.
 const maxNamePrefixLen = 63 - 1 - 8
 
+// maxTitlePrefixLen keeps "<prefix> - <hostname>" within UpCloud's
+// 255-character server title limit (hostname ≤ 63, separator = 3).
+const maxTitlePrefixLen = 255 - 3 - 63
+
 // sanitizeNamePrefix normalizes an arbitrary name_prefix into a valid hostname
 // label fragment: lowercased, with runs of invalid characters collapsed to a
 // single hyphen, leading/trailing hyphens trimmed, and truncated so the full
@@ -446,7 +518,7 @@ func randomSuffix(n int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = chars[rand.Intn(len(chars))]
+		b[i] = chars[rand.IntN(len(chars))]
 	}
 	return string(b)
 }

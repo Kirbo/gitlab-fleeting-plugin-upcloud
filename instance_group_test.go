@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"sync"
 	"testing"
@@ -180,6 +181,13 @@ func TestValidate(t *testing.T) {
 			wantMaxSize:     defaultMaxSize,
 		},
 		{
+			name:            "overlong title prefix truncated to fit 255-char title",
+			g:               InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", TitlePrefix: strings.Repeat("t", 200)},
+			wantPlan:        defaultPlan,
+			wantTitlePrefix: strings.Repeat("t", maxTitlePrefixLen),
+			wantMaxSize:     defaultMaxSize,
+		},
+		{
 			name:        "explicit max size preserved",
 			g:           InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", MaxSize: 5},
 			wantPlan:    defaultPlan,
@@ -220,8 +228,11 @@ func TestMapServerState(t *testing.T) {
 		want  provider.State
 	}{
 		{upcloud.ServerStateStarted, provider.StateRunning},
-		{upcloud.ServerStateStopped, provider.StateDeleted},
-		{upcloud.ServerStateError, provider.StateDeleted},
+		// Stopped/errored servers still exist and bill for storage: they must
+		// stay tracked (StateDeleting) so the taskscaler retries deletion,
+		// instead of being dropped (StateDeleted) and leaked.
+		{upcloud.ServerStateStopped, provider.StateDeleting},
+		{upcloud.ServerStateError, provider.StateDeleting},
 		{"maintenance", provider.StateCreating},
 		{"new", provider.StateCreating},
 		{"", provider.StateCreating},
@@ -316,8 +327,8 @@ func TestUpdate(t *testing.T) {
 	if seen["uuid-1"] != provider.StateRunning {
 		t.Errorf("uuid-1 state = %v, want StateRunning", seen["uuid-1"])
 	}
-	if seen["uuid-2"] != provider.StateDeleted {
-		t.Errorf("uuid-2 state = %v, want StateDeleted", seen["uuid-2"])
+	if seen["uuid-2"] != provider.StateDeleting {
+		t.Errorf("uuid-2 state = %v, want StateDeleting", seen["uuid-2"])
 	}
 }
 
@@ -394,6 +405,25 @@ func TestIncrease_AllFail(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "HOSTNAME_INVALID") {
 		t.Errorf("Increase() error = %v, want it to wrap the API error", err)
+	}
+	if n != 0 {
+		t.Errorf("Increase() = %d, want 0", n)
+	}
+}
+
+func TestIncrease_CancelledContext(t *testing.T) {
+	// createServer intentionally left as a panic: no creates may start once
+	// the caller's context is cancelled.
+	mock := newMockSvc()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	g := baseGroup(mock)
+	n, err := g.Increase(ctx, 3)
+
+	if err == nil {
+		t.Fatal("Increase() expected error for cancelled context, got nil")
 	}
 	if n != 0 {
 		t.Errorf("Increase() = %d, want 0", n)
@@ -509,6 +539,57 @@ func TestDecrease_AlreadyStopped(t *testing.T) {
 	}
 	if len(succeeded) != 1 {
 		t.Errorf("Decrease() succeeded = %v, want [uuid-stopped]", succeeded)
+	}
+}
+
+func TestDecrease_ErrorState(t *testing.T) {
+	deleted := false
+	mock := newMockSvc()
+	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+		return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateError}}, nil
+	}
+	// stopServer and waitForServerState intentionally left as panics:
+	// a server in the error state must be deleted without a stop attempt.
+	mock.deleteServerAndStorages = func(_ context.Context, _ *request.DeleteServerAndStoragesRequest) error {
+		deleted = true
+		return nil
+	}
+
+	g := baseGroup(mock)
+	succeeded, err := g.Decrease(context.Background(), []string{"uuid-error"})
+
+	if err != nil {
+		t.Fatalf("Decrease() unexpected error: %v", err)
+	}
+	if !deleted {
+		t.Error("Decrease() did not delete the error-state server")
+	}
+	if len(succeeded) != 1 {
+		t.Errorf("Decrease() succeeded = %v, want [uuid-error]", succeeded)
+	}
+}
+
+func TestDecrease_StopWaitHasDeadline(t *testing.T) {
+	mock := newMockSvc()
+	mock.getServerDetails = startedDetails
+	mock.stopServer = func(_ context.Context, _ *request.StopServerRequest) (*upcloud.ServerDetails, error) {
+		return &upcloud.ServerDetails{}, nil
+	}
+	var hadDeadline bool
+	mock.waitForServerState = func(ctx context.Context, _ *request.WaitForServerStateRequest) (*upcloud.ServerDetails, error) {
+		_, hadDeadline = ctx.Deadline()
+		return &upcloud.ServerDetails{}, nil
+	}
+	mock.deleteServerAndStorages = func(_ context.Context, _ *request.DeleteServerAndStoragesRequest) error {
+		return nil
+	}
+
+	g := baseGroup(mock)
+	if _, err := g.Decrease(context.Background(), []string{"uuid-1"}); err != nil {
+		t.Fatalf("Decrease() unexpected error: %v", err)
+	}
+	if !hadDeadline {
+		t.Error("WaitForServerState ctx has no deadline; an unresponsive server would hang Decrease forever")
 	}
 }
 
@@ -658,6 +739,31 @@ func TestHeartbeat_APIErrorTreatedAsHealthy(t *testing.T) {
 	}
 }
 
+func TestHeartbeat_NotFoundIsUnhealthy(t *testing.T) {
+	mock := newMockSvc()
+	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+		return nil, &upcloud.Problem{Status: http.StatusNotFound, Title: "SERVER_NOT_FOUND"}
+	}
+
+	g := baseGroup(mock)
+	if err := g.Heartbeat(context.Background(), "uuid-1"); err == nil {
+		t.Error("Heartbeat() expected error for 404 (server gone), got nil")
+	}
+}
+
+// ─── Suspend / Resume ─────────────────────────────────────────────────────────
+
+func TestSuspendResume_NotSupported(t *testing.T) {
+	g := baseGroup(newMockSvc())
+
+	if _, err := g.Suspend(context.Background(), []string{"uuid-1"}); !errors.Is(err, provider.ErrCapabilityNotSupported) {
+		t.Errorf("Suspend() error = %v, want ErrCapabilityNotSupported", err)
+	}
+	if _, err := g.Resume(context.Background(), []string{"uuid-1"}); !errors.Is(err, provider.ErrCapabilityNotSupported) {
+		t.Errorf("Resume() error = %v, want ErrCapabilityNotSupported", err)
+	}
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 func TestInit_InvalidSSHKey(t *testing.T) {
@@ -711,18 +817,5 @@ func TestInit_Success(t *testing.T) {
 	}
 	if !strings.Contains(info.ID, "fi-hel1") {
 		t.Errorf("ProviderInfo.ID = %q, expected to contain zone", info.ID)
-	}
-}
-
-// ─── Suspend / Resume ─────────────────────────────────────────────────────────
-
-func TestSuspendResume_NotSupported(t *testing.T) {
-	g := baseGroup(newMockSvc())
-
-	if _, err := g.Suspend(context.Background(), []string{"uuid-1"}); !errors.Is(err, provider.ErrCapabilityNotSupported) {
-		t.Errorf("Suspend() error = %v, want ErrCapabilityNotSupported", err)
-	}
-	if _, err := g.Resume(context.Background(), []string{"uuid-1"}); !errors.Is(err, provider.ErrCapabilityNotSupported) {
-		t.Errorf("Resume() error = %v, want ErrCapabilityNotSupported", err)
 	}
 }
