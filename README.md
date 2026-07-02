@@ -83,6 +83,7 @@ upctl server create \
 ### 2. Wait until the server has started
 
 ```sh
+TRIES=0
 while true; do
   STATE=$(upctl server show gitlab-runner-template -o json | jq -r '.state')
   echo "Current state: ${STATE}"
@@ -90,7 +91,7 @@ while true; do
     echo "Server started successfully."
     break
   elif (( TRIES >= 60 )); then
-    echo "Aborted due maximum 60 tries."
+    echo "Aborted due to maximum 60 tries."
     break
   fi
 
@@ -104,12 +105,15 @@ sleep 5 # Extra wait to ensure SSH is ready
 
 ```sh
 ssh root@$(upctl server show gitlab-runner-template -o json | jq -r '.ip_addresses[0].address') \
-  "curl -fsSL 'https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/custom-image-debian13.sh' | bash"
+  "curl -fsSL 'https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/custom-image-debian13.sh' | bash -s -- --all --poweroff"
 ```
+
+The `--poweroff` flag powers the server off once setup and cleanup finish, which is what the next step waits for.
 
 ### 4. Wait until the server has stopped
 
 ```bash
+TRIES=0
 while true; do
   STATE=$(upctl server show gitlab-runner-template -o json | jq -r '.state')
   echo "Current state: ${STATE}"
@@ -117,7 +121,7 @@ while true; do
     echo "Server stopped successfully."
     break
   elif (( TRIES >= 60 )); then
-    echo "Aborted due maximum 60 tries."
+    echo "Aborted due to maximum 60 tries."
     break
   fi
 

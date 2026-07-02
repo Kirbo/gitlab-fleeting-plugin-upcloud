@@ -96,8 +96,8 @@ do_setup() {
     apt-transport-https
 
   # Fix bad LC_CTYPE if present
-  if grep -q '^LC_CTYPE' /etc/environment 2>/dev/null || true; then
-    next_step "Fixing invalid LC_CTYPE in /etc/environment (if present)"
+  if grep -q '^LC_CTYPE' /etc/environment 2>/dev/null; then
+    next_step "Fixing invalid LC_CTYPE in /etc/environment"
     info "Removing LC_CTYPE from /etc/environment"
     sed -i '/^LC_CTYPE/d' /etc/environment || true
   fi
@@ -257,9 +257,10 @@ do_prepare() {
 # ---------------------------
 # Argument parsing (with optional --poweroff)
 # ---------------------------
-# Default mode
+# Default mode: run everything but leave the machine on; power off only when
+# explicitly requested with --poweroff (as documented in --help and the header).
 MODE="--all"
-DO_POWEROFF=1
+DO_POWEROFF=0
 
 # parse args (accepts --setup, --prepare, --all, --poweroff)
 for a in "$@"; do
