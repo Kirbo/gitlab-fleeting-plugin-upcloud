@@ -11,7 +11,7 @@ set -euo pipefail
 
 BINARY_NAME="fleeting-plugin-upcloud"
 DIST="${DIST:-dist}"
-TARGETS="${TARGETS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64}"
+TARGETS="${TARGETS:-linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64}"
 LDFLAGS="$("$(dirname "$0")/ldflags.sh")"
 
 sha256() {

@@ -49,9 +49,16 @@ GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o 
 [ "$(uname -s)" != "Darwin" ] || codesign --force --sign - bin/darwin-arm64/fleeting-plugin-upcloud
 """
 
+[tasks.build-windows]
+description = "Build for Windows (amd64 and arm64) into bin/windows-<arch>/"
+run = """
+GOOS=windows GOARCH=amd64 go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o bin/windows-amd64/fleeting-plugin-upcloud.exe .
+GOOS=windows GOARCH=arm64 go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o bin/windows-arm64/fleeting-plugin-upcloud.exe .
+"""
+
 [tasks.build-all]
 description = "Build for all common platforms into bin/<os>-<arch>/"
-depends = ["build-linux", "build-mac"]
+depends = ["build-linux", "build-mac", "build-windows"]
 
 # What CI publishes: every release target under its asset name, plus checksums.
 [tasks.dist]
