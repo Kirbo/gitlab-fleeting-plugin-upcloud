@@ -24,6 +24,7 @@ import (
 // *service.Service satisfies this interface; tests substitute a mock.
 type upcloudSvc interface {
 	GetAccount(ctx context.Context) (*upcloud.Account, error)
+	GetStorageDetails(ctx context.Context, r *request.GetStorageDetailsRequest) (*upcloud.StorageDetails, error)
 	GetServersWithFilters(ctx context.Context, r *request.GetServersWithFiltersRequest) (*upcloud.Servers, error)
 	CreateServer(ctx context.Context, r *request.CreateServerRequest) (*upcloud.ServerDetails, error)
 	StopServer(ctx context.Context, r *request.StopServerRequest) (*upcloud.ServerDetails, error)
@@ -44,14 +45,20 @@ const (
 	defaultTitlePrefix = "fleeting-plugin-upcloud"
 	defaultMaxSize     = 100
 
-	// maxConcurrentRequests bounds parallel UpCloud API calls in Increase and
-	// Decrease so a large scale event doesn't trip API rate limits.
+	// maxConcurrentRequests bounds parallel UpCloud API calls in Increase,
+	// Decrease, background deletions and Shutdown so a large scale event
+	// doesn't trip API rate limits.
 	maxConcurrentRequests = 10
 
-	// serverStopTimeout bounds how long stopAndDelete waits for a server to
-	// reach the stopped state. The caller's ctx may have no deadline, and the
-	// SDK's WaitForServerState polls until its ctx is done.
+	// serverStopTimeout bounds how long Shutdown waits for a server stopped by
+	// Decrease to reach the stopped state. The caller's ctx may have no
+	// deadline, and the SDK's WaitForServerState polls until its ctx is done.
 	serverStopTimeout = 5 * time.Minute
+
+	// deleteRetryInterval throttles background deletions of the same server,
+	// so a persistently failing delete is retried without hammering the API.
+	// It exceeds the 30s client timeout, so attempts never overlap.
+	deleteRetryInterval = time.Minute
 )
 
 // InstanceGroup implements provider.InstanceGroup for UpCloud.
@@ -70,7 +77,7 @@ type InstanceGroup struct {
 	// Optional config
 	Plan              string `json:"plan"`                // default: "1xCPU-2GB"
 	StorageSize       int    `json:"storage_size"`        // GB, 0 = inherit from template
-	StorageTier       string `json:"storage_tier"`        // "maxiops" or "standard"; default: inherit from template
+	StorageTier       string `json:"storage_tier"`        // "maxiops", "standard" or "hdd"; default: inherit from template
 	NamePrefix        string `json:"name_prefix"`         // hostname prefix, default: "fleeting"
 	TitlePrefix       string `json:"title_prefix"`        // server title prefix, default: "fleeting-plugin-upcloud"
 	MaxSize           int    `json:"max_size"`            // default: 100
@@ -82,6 +89,21 @@ type InstanceGroup struct {
 	settings  provider.Settings
 	svc       upcloudSvc
 	publicKey string // SSH authorized_keys format, derived from settings.ConnectorConfig.Key
+
+	// Background deletions outlive the Update call that starts them, so they
+	// run on a plugin-lifetime context that Shutdown cancels.
+	ctx        context.Context
+	cancel     context.CancelFunc
+	cleanups   sync.WaitGroup
+	cleanupSem chan struct{}
+
+	mu sync.Mutex
+	// deleteAttempts records when a background delete of each stopped or
+	// errored server last started; see deleteInBackground.
+	deleteAttempts map[string]time.Time
+	// stopping holds servers Decrease hard-stopped whose deletion hasn't
+	// been confirmed yet; Shutdown finishes them.
+	stopping map[string]struct{}
 }
 
 // validate checks that required config fields are set and applies defaults.
@@ -97,6 +119,18 @@ func (g *InstanceGroup) validate() error {
 	}
 	if g.Name == "" {
 		return fmt.Errorf("name is required")
+	}
+	switch g.StorageTier {
+	case "", upcloud.StorageTierMaxIOPS, upcloud.StorageTierStandard, upcloud.StorageTierHDD:
+	default:
+		return fmt.Errorf("storage_tier must be one of %q, %q or %q, got %q",
+			upcloud.StorageTierMaxIOPS, upcloud.StorageTierStandard, upcloud.StorageTierHDD, g.StorageTier)
+	}
+	if g.StorageSize < 0 {
+		return fmt.Errorf("storage_size must not be negative")
+	}
+	if g.MaxSize < 0 {
+		return fmt.Errorf("max_size must not be negative")
 	}
 	if g.Plan == "" {
 		g.Plan = defaultPlan
@@ -134,8 +168,16 @@ func (g *InstanceGroup) newClient() *client.Client {
 	return client.New(g.Username, g.Password, client.WithTimeout(30*time.Second))
 }
 
+// initState prepares the internal state used by background deletions.
+func (g *InstanceGroup) initState() {
+	g.ctx, g.cancel = context.WithCancel(context.Background())
+	g.cleanupSem = make(chan struct{}, maxConcurrentRequests)
+	g.deleteAttempts = make(map[string]time.Time)
+	g.stopping = make(map[string]struct{})
+}
+
 // Init is called once at startup. It validates config, derives the SSH public key,
-// creates the UpCloud client, and validates credentials.
+// creates the UpCloud client, and validates credentials and the template.
 func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings provider.Settings) (provider.ProviderInfo, error) {
 	g.log = log
 	g.settings = settings
@@ -162,6 +204,18 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 		return provider.ProviderInfo{}, fmt.Errorf("authenticating with UpCloud API: %w", err)
 	}
 
+	// Fail fast on a mistyped template UUID instead of failing every create.
+	// Other errors (e.g. a subaccount without storage permissions) only warn:
+	// creates may still succeed.
+	if _, err := g.svc.GetStorageDetails(ctx, &request.GetStorageDetailsRequest{UUID: g.Template}); err != nil {
+		if isNotFound(err) {
+			return provider.ProviderInfo{}, fmt.Errorf("template %s not found: %w", g.Template, err)
+		}
+		log.Warn("could not verify template", "template", g.Template, "error", err)
+	}
+
+	g.initState()
+
 	log.Info("initialized", "zone", g.Zone, "group", g.Name, "plan", g.Plan)
 
 	return provider.ProviderInfo{
@@ -173,7 +227,9 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 }
 
 // Update polls UpCloud for the current state of all instances in this group,
-// calling fn for each discovered instance.
+// calling fn for each discovered instance. Stopped and errored servers are
+// deleted in the background, since nothing else removes them (see
+// mapServerState).
 func (g *InstanceGroup) Update(ctx context.Context, fn func(instance string, state provider.State)) error {
 	servers, err := g.svc.GetServersWithFilters(ctx, &request.GetServersWithFiltersRequest{
 		Filters: []request.QueryFilter{
@@ -184,19 +240,39 @@ func (g *InstanceGroup) Update(ctx context.Context, fn func(instance string, sta
 		return fmt.Errorf("listing group servers: %w", err)
 	}
 
+	listed := make(map[string]struct{}, len(servers.Servers))
 	for _, s := range servers.Servers {
-		fn(s.UUID, mapServerState(s.State))
+		listed[s.UUID] = struct{}{}
+		state := mapServerState(s.State)
+		if state == provider.StateDeleting {
+			g.deleteInBackground(s.UUID)
+		}
+		fn(s.UUID, state)
 	}
+
+	// Forget servers that are gone so the bookkeeping maps don't grow forever.
+	g.mu.Lock()
+	for uuid := range g.deleteAttempts {
+		if _, ok := listed[uuid]; !ok {
+			delete(g.deleteAttempts, uuid)
+		}
+	}
+	for uuid := range g.stopping {
+		if _, ok := listed[uuid]; !ok {
+			delete(g.stopping, uuid)
+		}
+	}
+	g.mu.Unlock()
 
 	return nil
 }
 
 // mapServerState converts an UpCloud server state string to a provider.State.
-// Stopped and errored servers still exist (and bill for storage), so they are
-// reported as StateDeleting rather than StateDeleted: the taskscaler keeps
-// tracking them and retries Decrease until the server is actually gone.
-// Reporting them as deleted would drop them from tracking and leak them
-// forever (e.g. when a Decrease stopped a server but the delete failed).
+// Stopped and errored servers still exist (and bill for storage) but can't run
+// jobs, so they are reported as StateDeleting. Fleeting never passes
+// StateDeleting instances to Decrease, so Update deletes them itself. This
+// covers servers Decrease hard-stopped, servers whose earlier delete failed,
+// and servers stopped outside the plugin.
 func mapServerState(s string) provider.State {
 	switch s {
 	case upcloud.ServerStateStarted:
@@ -207,6 +283,33 @@ func mapServerState(s string) provider.State {
 		// "new", "maintenance", etc.
 		return provider.StateCreating
 	}
+}
+
+// deleteInBackground deletes a stopped or errored server without blocking
+// Update. Attempts per server are throttled to one per deleteRetryInterval.
+func (g *InstanceGroup) deleteInBackground(uuid string) {
+	g.mu.Lock()
+	if last, ok := g.deleteAttempts[uuid]; ok && time.Since(last) < deleteRetryInterval {
+		g.mu.Unlock()
+		return
+	}
+	g.deleteAttempts[uuid] = time.Now()
+	g.mu.Unlock()
+
+	g.cleanups.Add(1)
+	go func() {
+		defer g.cleanups.Done()
+		g.cleanupSem <- struct{}{}
+		defer func() { <-g.cleanupSem }()
+
+		if err := g.deleteServer(g.ctx, uuid); err != nil {
+			g.log.Error("failed to delete stopped instance; will retry", "uuid", uuid, "error", err)
+			return
+		}
+		g.mu.Lock()
+		delete(g.stopping, uuid)
+		g.mu.Unlock()
+	}()
 }
 
 // Increase creates n new UpCloud servers in this group in parallel (bounded
@@ -222,7 +325,7 @@ func (g *InstanceGroup) Increase(ctx context.Context, n int) (int, error) {
 	)
 	sem := make(chan struct{}, maxConcurrentRequests)
 
-	for i := 0; i < n; i++ {
+	for range n {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -319,85 +422,60 @@ func (g *InstanceGroup) createServer(ctx context.Context) error {
 	return nil
 }
 
-// Decrease stops and deletes the specified instances in parallel (bounded by
-// maxConcurrentRequests). It returns the UUIDs of instances that were
-// successfully removed and an error aggregating any failed removals.
+// Decrease starts removing the specified instances in parallel (bounded by
+// maxConcurrentRequests). It returns the UUIDs of instances whose removal was
+// successfully requested and an error aggregating any failures.
 func (g *InstanceGroup) Decrease(ctx context.Context, instances []string) ([]string, error) {
-	var (
-		mu        sync.Mutex
-		succeeded []string
-		errs      []error
-		wg        sync.WaitGroup
-	)
-	sem := make(chan struct{}, maxConcurrentRequests)
-
-	for _, id := range instances {
-		wg.Add(1)
-		go func(uuid string) {
-			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
-
-			if err := g.stopAndDelete(ctx, uuid); err != nil {
-				g.log.Error("failed to remove instance", "uuid", uuid, "error", err)
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-				return
-			}
-			mu.Lock()
-			succeeded = append(succeeded, uuid)
-			mu.Unlock()
-		}(id)
-	}
-
-	wg.Wait()
-	return succeeded, errors.Join(errs...)
+	return forEachConcurrently(instances, func(uuid string) error {
+		if err := g.removeInstance(ctx, uuid); err != nil {
+			g.log.Error("failed to remove instance", "uuid", uuid, "error", err)
+			return err
+		}
+		return nil
+	})
 }
 
-// stopAndDelete hard-stops a server, waits for it to reach the stopped state,
-// then deletes it along with all its storage devices. A server that is already
-// stopped (e.g. a previous Decrease stopped it but the delete failed) or in
-// the error state is deleted directly — hard-stopping it would error and
-// leave it orphaned.
-func (g *InstanceGroup) stopAndDelete(ctx context.Context, uuid string) error {
+// removeInstance starts removing a server without waiting for it to stop.
+// Fleeting calls Decrease and Update from the same loop, so waiting here would
+// stall provisioning. Running servers are hard-stopped and deleted by Update
+// once UpCloud reports them stopped. Stopped or errored servers (a stop
+// attempt would fail) are deleted directly, and missing ones count as removed.
+func (g *InstanceGroup) removeInstance(ctx context.Context, uuid string) error {
 	details, err := g.svc.GetServerDetails(ctx, &request.GetServerDetailsRequest{UUID: uuid})
 	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
 		return fmt.Errorf("getting server details for %s: %w", uuid, err)
 	}
 
 	switch details.State {
 	case upcloud.ServerStateStopped, upcloud.ServerStateError:
-		// Deletable as-is; a stop attempt would fail.
-	default:
-		_, err := g.svc.StopServer(ctx, &request.StopServerRequest{
-			UUID:     uuid,
-			StopType: request.ServerStopTypeHard,
-		})
-		if err != nil {
-			return fmt.Errorf("stopping server %s: %w", uuid, err)
-		}
-
-		// The SDK polls until ctx is done; the caller's ctx may have no
-		// deadline, so bound the wait explicitly.
-		waitCtx, cancel := context.WithTimeout(ctx, serverStopTimeout)
-		defer cancel()
-
-		_, err = g.svc.WaitForServerState(waitCtx, &request.WaitForServerStateRequest{
-			UUID:         uuid,
-			DesiredState: upcloud.ServerStateStopped,
-		})
-		if err != nil {
-			return fmt.Errorf("waiting for server %s to stop: %w", uuid, err)
-		}
+		return g.deleteServer(ctx, uuid)
 	}
 
-	if err := g.svc.DeleteServerAndStorages(ctx, &request.DeleteServerAndStoragesRequest{
-		UUID: uuid,
+	if _, err := g.svc.StopServer(ctx, &request.StopServerRequest{
+		UUID:     uuid,
+		StopType: request.ServerStopTypeHard,
 	}); err != nil {
+		return fmt.Errorf("stopping server %s: %w", uuid, err)
+	}
+
+	g.mu.Lock()
+	g.stopping[uuid] = struct{}{}
+	g.mu.Unlock()
+
+	g.log.Info("stopping instance for removal", "uuid", uuid)
+	return nil
+}
+
+// deleteServer deletes a stopped server along with all its storage devices.
+// A server that is already gone counts as deleted.
+func (g *InstanceGroup) deleteServer(ctx context.Context, uuid string) error {
+	err := g.svc.DeleteServerAndStorages(ctx, &request.DeleteServerAndStoragesRequest{UUID: uuid})
+	if err != nil && !isNotFound(err) {
 		return fmt.Errorf("deleting server %s: %w", uuid, err)
 	}
-
 	g.log.Info("removed instance", "uuid", uuid)
 	return nil
 }
@@ -453,8 +531,7 @@ func (g *InstanceGroup) Heartbeat(ctx context.Context, id string) error {
 	details, err := g.svc.GetServerDetails(ctx, &request.GetServerDetailsRequest{UUID: id})
 	if err != nil {
 		// A 404 is definitive: the server no longer exists and must be replaced.
-		var problem *upcloud.Problem
-		if errors.As(err, &problem) && problem.Status == http.StatusNotFound {
+		if isNotFound(err) {
 			return fmt.Errorf("server %s not found: %w", id, err)
 		}
 		// Treat other (transient) API errors as healthy to avoid premature instance replacement
@@ -462,8 +539,9 @@ func (g *InstanceGroup) Heartbeat(ctx context.Context, id string) error {
 		return nil
 	}
 
-	if details.State == upcloud.ServerStateError {
-		return fmt.Errorf("server %s is in error state", id)
+	switch details.State {
+	case upcloud.ServerStateError, upcloud.ServerStateStopped:
+		return fmt.Errorf("server %s is %s", id, details.State)
 	}
 
 	return nil
@@ -481,9 +559,110 @@ func (g *InstanceGroup) Resume(_ context.Context, _ []string) ([]string, error) 
 	return nil, provider.ErrCapabilityNotSupported
 }
 
-// Shutdown performs cleanup before the plugin exits.
-func (g *InstanceGroup) Shutdown(_ context.Context) error {
-	return nil
+// Shutdown finishes removals still in progress, so servers stopped by
+// Decrease aren't left behind (billing for storage) when the runner exits,
+// e.g. after delete_instances_on_shutdown. It waits for background deletions,
+// then for each server Decrease stopped to reach the stopped state before
+// deleting it. ctx bounds the whole wait.
+func (g *InstanceGroup) Shutdown(ctx context.Context) error {
+	if g.cancel == nil {
+		return nil // Init never completed
+	}
+	defer g.cancel()
+
+	done := make(chan struct{})
+	go func() {
+		g.cleanups.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		return fmt.Errorf("waiting for background deletions: %w", ctx.Err())
+	}
+
+	g.mu.Lock()
+	pending := make([]string, 0, len(g.stopping))
+	for uuid := range g.stopping {
+		pending = append(pending, uuid)
+	}
+	g.mu.Unlock()
+
+	_, err := forEachConcurrently(pending, func(uuid string) error {
+		return g.finishRemoval(ctx, uuid)
+	})
+	return err
+}
+
+// finishRemoval waits for a server Decrease stopped to reach the stopped state,
+// then deletes it.
+func (g *InstanceGroup) finishRemoval(ctx context.Context, uuid string) error {
+	details, err := g.svc.GetServerDetails(ctx, &request.GetServerDetailsRequest{UUID: uuid})
+	if err != nil {
+		if isNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("getting server details for %s: %w", uuid, err)
+	}
+
+	switch details.State {
+	case upcloud.ServerStateStopped, upcloud.ServerStateError:
+	default:
+		waitCtx, cancel := context.WithTimeout(ctx, serverStopTimeout)
+		defer cancel()
+
+		if _, err := g.svc.WaitForServerState(waitCtx, &request.WaitForServerStateRequest{
+			UUID:         uuid,
+			DesiredState: upcloud.ServerStateStopped,
+		}); err != nil {
+			if isNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("waiting for server %s to stop: %w", uuid, err)
+		}
+	}
+
+	return g.deleteServer(ctx, uuid)
+}
+
+// forEachConcurrently calls fn for each id in parallel, at most
+// maxConcurrentRequests at a time. It returns the ids for which fn succeeded
+// and the joined errors of the rest.
+func forEachConcurrently(ids []string, fn func(id string) error) ([]string, error) {
+	var (
+		mu        sync.Mutex
+		succeeded []string
+		errs      []error
+		wg        sync.WaitGroup
+	)
+	sem := make(chan struct{}, maxConcurrentRequests)
+
+	for _, id := range ids {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			err := fn(id)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+			succeeded = append(succeeded, id)
+		}()
+	}
+
+	wg.Wait()
+	return succeeded, errors.Join(errs...)
+}
+
+// isNotFound reports whether err is an UpCloud API 404 response.
+func isNotFound(err error) bool {
+	var problem *upcloud.Problem
+	return errors.As(err, &problem) && problem.Status == http.StatusNotFound
 }
 
 // namePrefixInvalidChars matches runs of characters not allowed in a hostname label.
@@ -514,11 +693,12 @@ func sanitizeNamePrefix(s string) string {
 }
 
 // randomSuffix generates a random lowercase alphanumeric string of length n.
+// It only needs to make hostnames unique, so math/rand is sufficient.
 func randomSuffix(n int) string {
 	const chars = "abcdefghijklmnopqrstuvwxyz0123456789"
 	b := make([]byte, n)
 	for i := range b {
-		b[i] = chars[rand.IntN(len(chars))]
+		b[i] = chars[rand.IntN(len(chars))] //nolint:gosec // not security-sensitive
 	}
 	return string(b)
 }

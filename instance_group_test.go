@@ -2,26 +2,34 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/pem"
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	upcloud "github.com/UpCloudLtd/upcloud-go-api/v8/upcloud"
 	"github.com/UpCloudLtd/upcloud-go-api/v8/upcloud/client"
 	"github.com/UpCloudLtd/upcloud-go-api/v8/upcloud/request"
 	"github.com/hashicorp/go-hclog"
 	"gitlab.com/gitlab-org/fleeting/fleeting/provider"
+	"golang.org/x/crypto/ssh"
 )
 
 // ─── mock ────────────────────────────────────────────────────────────────────
 
 // mockSvc is a test double for upcloudSvc.
 // Each field is a function so individual tests can customise behaviour.
+// Calls are serialized, so the functions may update test state without locking.
 type mockSvc struct {
 	mu                      sync.Mutex
 	getAccount              func(context.Context) (*upcloud.Account, error)
+	getStorageDetails       func(context.Context, *request.GetStorageDetailsRequest) (*upcloud.StorageDetails, error)
 	getServersWithFilters   func(context.Context, *request.GetServersWithFiltersRequest) (*upcloud.Servers, error)
 	createServer            func(context.Context, *request.CreateServerRequest) (*upcloud.ServerDetails, error)
 	stopServer              func(context.Context, *request.StopServerRequest) (*upcloud.ServerDetails, error)
@@ -31,9 +39,18 @@ type mockSvc struct {
 }
 
 func (m *mockSvc) GetAccount(ctx context.Context) (*upcloud.Account, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.getAccount(ctx)
 }
+func (m *mockSvc) GetStorageDetails(ctx context.Context, r *request.GetStorageDetailsRequest) (*upcloud.StorageDetails, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.getStorageDetails(ctx, r)
+}
 func (m *mockSvc) GetServersWithFilters(ctx context.Context, r *request.GetServersWithFiltersRequest) (*upcloud.Servers, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.getServersWithFilters(ctx, r)
 }
 func (m *mockSvc) CreateServer(ctx context.Context, r *request.CreateServerRequest) (*upcloud.ServerDetails, error) {
@@ -57,6 +74,8 @@ func (m *mockSvc) DeleteServerAndStorages(ctx context.Context, r *request.Delete
 	return m.deleteServerAndStorages(ctx, r)
 }
 func (m *mockSvc) GetServerDetails(ctx context.Context, r *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.getServerDetails(ctx, r)
 }
 
@@ -65,6 +84,10 @@ func newMockSvc() *mockSvc {
 	panic := func(name string) { panic("unexpected call to mockSvc." + name) }
 	return &mockSvc{
 		getAccount: func(context.Context) (*upcloud.Account, error) { panic("GetAccount"); return nil, nil },
+		getStorageDetails: func(context.Context, *request.GetStorageDetailsRequest) (*upcloud.StorageDetails, error) {
+			panic("GetStorageDetails")
+			return nil, nil
+		},
 		getServersWithFilters: func(context.Context, *request.GetServersWithFiltersRequest) (*upcloud.Servers, error) {
 			panic("GetServersWithFilters")
 			return nil, nil
@@ -92,7 +115,7 @@ func newMockSvc() *mockSvc {
 	}
 }
 
-// baseGroup returns a minimal valid InstanceGroup with a pre-set mock service.
+// baseGroup returns a minimal valid, initialized InstanceGroup with a pre-set mock service.
 func baseGroup(svc *mockSvc) *InstanceGroup {
 	g := &InstanceGroup{
 		Token:    "test-token",
@@ -103,7 +126,25 @@ func baseGroup(svc *mockSvc) *InstanceGroup {
 		svc:      svc,
 		log:      hclog.NewNullLogger(),
 	}
+	g.initState()
 	return g
+}
+
+// notFound is the error the UpCloud SDK returns for a missing resource.
+var notFound = &upcloud.Problem{Status: http.StatusNotFound, Title: "SERVER_NOT_FOUND"}
+
+// detailsInState returns a GetServerDetails mock reporting the given state.
+func detailsInState(state string) func(context.Context, *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+	return func(context.Context, *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+		return &upcloud.ServerDetails{Server: upcloud.Server{State: state}}, nil
+	}
+}
+
+// listServers returns a GetServersWithFilters mock listing the given servers.
+func listServers(servers ...upcloud.Server) func(context.Context, *request.GetServersWithFiltersRequest) (*upcloud.Servers, error) {
+	return func(context.Context, *request.GetServersWithFiltersRequest) (*upcloud.Servers, error) {
+		return &upcloud.Servers{Servers: servers}, nil
+	}
 }
 
 // ─── validate ────────────────────────────────────────────────────────────────
@@ -161,6 +202,25 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "valid storage tier",
+			g:    InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", StorageTier: "maxiops"},
+		},
+		{
+			name:    "invalid storage tier",
+			g:       InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", StorageTier: "MaxIOPS"},
+			wantErr: true,
+		},
+		{
+			name:    "negative storage size",
+			g:       InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", StorageSize: -1},
+			wantErr: true,
+		},
+		{
+			name:    "negative max size",
+			g:       InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", MaxSize: -1},
+			wantErr: true,
+		},
+		{
 			name:        "explicit plan preserved",
 			g:           InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", Plan: "2xCPU-4GB"},
 			wantPlan:    "2xCPU-4GB",
@@ -195,7 +255,9 @@ func TestValidate(t *testing.T) {
 		},
 	}
 
-	for _, tc := range tests {
+	// Index instead of copying: InstanceGroup holds locks.
+	for i := range tests {
+		tc := &tests[i]
 		t.Run(tc.name, func(t *testing.T) {
 			err := tc.g.validate()
 			if (err != nil) != tc.wantErr {
@@ -228,9 +290,9 @@ func TestMapServerState(t *testing.T) {
 		want  provider.State
 	}{
 		{upcloud.ServerStateStarted, provider.StateRunning},
-		// Stopped/errored servers still exist and bill for storage: they must
-		// stay tracked (StateDeleting) so the taskscaler retries deletion,
-		// instead of being dropped (StateDeleted) and leaked.
+		// Stopped/errored servers still exist and bill for storage: they stay
+		// tracked (StateDeleting) while Update deletes them, instead of being
+		// dropped (StateDeleted) and leaked.
 		{upcloud.ServerStateStopped, provider.StateDeleting},
 		{upcloud.ServerStateError, provider.StateDeleting},
 		{"maintenance", provider.StateCreating},
@@ -302,33 +364,49 @@ func TestSanitizeNamePrefix(t *testing.T) {
 // ─── Update ───────────────────────────────────────────────────────────────────
 
 func TestUpdate(t *testing.T) {
+	var filters []request.QueryFilter
 	mock := newMockSvc()
-	mock.getServersWithFilters = func(_ context.Context, _ *request.GetServersWithFiltersRequest) (*upcloud.Servers, error) {
+	mock.getServersWithFilters = func(_ context.Context, r *request.GetServersWithFiltersRequest) (*upcloud.Servers, error) {
+		filters = r.Filters
 		return &upcloud.Servers{
 			Servers: []upcloud.Server{
 				{UUID: "uuid-1", State: upcloud.ServerStateStarted},
 				{UUID: "uuid-2", State: upcloud.ServerStateStopped},
+				{UUID: "uuid-3", State: "maintenance"},
 			},
 		}, nil
 	}
+	mock.deleteServerAndStorages = func(context.Context, *request.DeleteServerAndStoragesRequest) error { return nil }
 
 	g := baseGroup(mock)
 	seen := map[string]provider.State{}
 	err := g.Update(context.Background(), func(id string, state provider.State) {
 		seen[id] = state
 	})
+	g.cleanups.Wait()
 
 	if err != nil {
 		t.Fatalf("Update() unexpected error: %v", err)
 	}
-	if len(seen) != 2 {
-		t.Fatalf("Update() reported %d instances, want 2", len(seen))
+	want := map[string]provider.State{
+		"uuid-1": provider.StateRunning,
+		"uuid-2": provider.StateDeleting,
+		"uuid-3": provider.StateCreating,
 	}
-	if seen["uuid-1"] != provider.StateRunning {
-		t.Errorf("uuid-1 state = %v, want StateRunning", seen["uuid-1"])
+	if len(seen) != len(want) {
+		t.Fatalf("Update() reported %v, want %v", seen, want)
 	}
-	if seen["uuid-2"] != provider.StateDeleting {
-		t.Errorf("uuid-2 state = %v, want StateDeleting", seen["uuid-2"])
+	for id, state := range want {
+		if seen[id] != state {
+			t.Errorf("%s state = %v, want %v", id, seen[id], state)
+		}
+	}
+
+	// The group label filter is what scopes the plugin to its own servers;
+	// a wrong key or value would leak (or steal) servers.
+	wantFilter := request.FilterLabel{Label: upcloud.Label{Key: groupLabelKey, Value: "test-group"}}
+	if len(filters) != 1 || filters[0] != wantFilter {
+		t.Errorf("GetServersWithFilters filters = %#v, want [%#v]", filters, wantFilter)
 	}
 }
 
@@ -341,6 +419,81 @@ func TestUpdate_APIError(t *testing.T) {
 	g := baseGroup(mock)
 	if err := g.Update(context.Background(), func(string, provider.State) {}); err == nil {
 		t.Fatal("Update() expected error, got nil")
+	}
+}
+
+func TestUpdate_DeletesStoppedAndErroredServers(t *testing.T) {
+	var deleted []string
+	mock := newMockSvc()
+	mock.getServersWithFilters = listServers(
+		upcloud.Server{UUID: "uuid-running", State: upcloud.ServerStateStarted},
+		upcloud.Server{UUID: "uuid-stopped", State: upcloud.ServerStateStopped},
+		upcloud.Server{UUID: "uuid-error", State: upcloud.ServerStateError},
+	)
+	mock.deleteServerAndStorages = func(_ context.Context, r *request.DeleteServerAndStoragesRequest) error {
+		deleted = append(deleted, r.UUID)
+		return nil
+	}
+
+	g := baseGroup(mock)
+	if err := g.Update(context.Background(), func(string, provider.State) {}); err != nil {
+		t.Fatalf("Update() unexpected error: %v", err)
+	}
+	g.cleanups.Wait()
+
+	slices.Sort(deleted)
+	if want := []string{"uuid-error", "uuid-stopped"}; !slices.Equal(deleted, want) {
+		t.Errorf("deleted = %v, want %v", deleted, want)
+	}
+}
+
+func TestUpdate_ThrottlesDeleteRetries(t *testing.T) {
+	attempts := 0
+	mock := newMockSvc()
+	mock.getServersWithFilters = listServers(upcloud.Server{UUID: "uuid-stopped", State: upcloud.ServerStateStopped})
+	mock.deleteServerAndStorages = func(context.Context, *request.DeleteServerAndStoragesRequest) error {
+		attempts++
+		return errors.New("delete failed")
+	}
+
+	g := baseGroup(mock)
+	update := func() {
+		t.Helper()
+		if err := g.Update(context.Background(), func(string, provider.State) {}); err != nil {
+			t.Fatalf("Update() unexpected error: %v", err)
+		}
+		g.cleanups.Wait()
+	}
+
+	update()
+	update() // within deleteRetryInterval: no new attempt
+	if attempts != 1 {
+		t.Fatalf("delete attempts = %d, want 1 (retries throttled)", attempts)
+	}
+
+	// Once the interval has passed, the failed delete is retried.
+	g.mu.Lock()
+	g.deleteAttempts["uuid-stopped"] = time.Now().Add(-deleteRetryInterval)
+	g.mu.Unlock()
+	update()
+	if attempts != 2 {
+		t.Errorf("delete attempts = %d, want 2 (retried after interval)", attempts)
+	}
+}
+
+func TestUpdate_ForgetsServersThatAreGone(t *testing.T) {
+	mock := newMockSvc()
+	mock.getServersWithFilters = listServers(upcloud.Server{UUID: "uuid-1", State: upcloud.ServerStateStarted})
+
+	g := baseGroup(mock)
+	g.deleteAttempts["uuid-gone"] = time.Now()
+	g.stopping["uuid-gone"] = struct{}{}
+
+	if err := g.Update(context.Background(), func(string, provider.State) {}); err != nil {
+		t.Fatalf("Update() unexpected error: %v", err)
+	}
+	if len(g.deleteAttempts) != 0 || len(g.stopping) != 0 {
+		t.Errorf("bookkeeping not pruned: deleteAttempts=%v stopping=%v", g.deleteAttempts, g.stopping)
 	}
 }
 
@@ -365,6 +518,78 @@ func TestIncrease_AllSucceed(t *testing.T) {
 	}
 	if len(created) != 3 {
 		t.Errorf("CreateServer called %d times, want 3", len(created))
+	}
+}
+
+func TestIncrease_CreateRequest(t *testing.T) {
+	var req *request.CreateServerRequest
+	mock := newMockSvc()
+	mock.createServer = func(_ context.Context, r *request.CreateServerRequest) (*upcloud.ServerDetails, error) {
+		req = r
+		return &upcloud.ServerDetails{}, nil
+	}
+
+	g := baseGroup(mock)
+	g.NamePrefix = "ci"
+	g.TitlePrefix = "CI Runner"
+	g.StorageSize = 20
+	g.StorageTier = upcloud.StorageTierMaxIOPS
+	g.publicKey = "ssh-ed25519 AAAA test\n"
+	g.settings.Username = "root"
+
+	if _, err := g.Increase(context.Background(), 1); err != nil {
+		t.Fatalf("Increase() unexpected error: %v", err)
+	}
+
+	if !strings.HasPrefix(req.Hostname, "ci-") || len(req.Hostname) != len("ci-")+8 {
+		t.Errorf("Hostname = %q, want ci-<8 chars>", req.Hostname)
+	}
+	if want := "CI Runner - " + req.Hostname; req.Title != want {
+		t.Errorf("Title = %q, want %q", req.Title, want)
+	}
+	if req.Zone != "fi-hel1" || req.Plan != defaultPlan {
+		t.Errorf("Zone/Plan = %q/%q, want fi-hel1/%s", req.Zone, req.Plan, defaultPlan)
+	}
+	if req.Metadata != upcloud.True {
+		t.Error("Metadata service not enabled; cloud-init can't inject the SSH key")
+	}
+	// Update finds the group's servers by this label.
+	if req.Labels == nil || len(*req.Labels) != 1 || (*req.Labels)[0] != (upcloud.Label{Key: groupLabelKey, Value: "test-group"}) {
+		t.Errorf("Labels = %v, want [%s=test-group]", req.Labels, groupLabelKey)
+	}
+
+	if len(req.StorageDevices) != 1 {
+		t.Fatalf("StorageDevices = %v, want one clone of the template", req.StorageDevices)
+	}
+	disk := req.StorageDevices[0]
+	if disk.Action != request.CreateServerStorageDeviceActionClone || disk.Storage != "template-uuid" || disk.Size != 20 || disk.Tier != upcloud.StorageTierMaxIOPS {
+		t.Errorf("storage device = %+v, want clone of template-uuid, 20 GB, maxiops", disk)
+	}
+
+	if req.LoginUser == nil || req.LoginUser.Username != "root" || !slices.Equal([]string(req.LoginUser.SSHKeys), []string{g.publicKey}) {
+		t.Errorf("LoginUser = %+v, want root with the connector key", req.LoginUser)
+	}
+
+	ifaces := req.Networking.Interfaces
+	if len(ifaces) != 1 || ifaces[0].Type != upcloud.NetworkTypePublic {
+		t.Errorf("interfaces = %+v, want a single public interface", ifaces)
+	}
+}
+
+func TestIncrease_NoSSHKey(t *testing.T) {
+	var req *request.CreateServerRequest
+	mock := newMockSvc()
+	mock.createServer = func(_ context.Context, r *request.CreateServerRequest) (*upcloud.ServerDetails, error) {
+		req = r
+		return &upcloud.ServerDetails{}, nil
+	}
+
+	g := baseGroup(mock)
+	if _, err := g.Increase(context.Background(), 1); err != nil {
+		t.Fatalf("Increase() unexpected error: %v", err)
+	}
+	if req.LoginUser != nil {
+		t.Errorf("LoginUser = %+v, want nil without a connector key", req.LoginUser)
 	}
 }
 
@@ -459,24 +684,20 @@ func TestIncrease_SetsUserData(t *testing.T) {
 
 // ─── Decrease ─────────────────────────────────────────────────────────────────
 
-// startedDetails returns server details in the "started" state, as
-// stopAndDelete checks current state before stopping.
-func startedDetails(context.Context, *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
-	return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateStarted}}, nil
-}
-
-func TestDecrease_AllSucceed(t *testing.T) {
+func TestDecrease_RunningServersAreStoppedNotWaitedOn(t *testing.T) {
+	var stopped []string
 	mock := newMockSvc()
-	mock.getServerDetails = startedDetails
-	mock.stopServer = func(_ context.Context, _ *request.StopServerRequest) (*upcloud.ServerDetails, error) {
+	mock.getServerDetails = detailsInState(upcloud.ServerStateStarted)
+	mock.stopServer = func(_ context.Context, r *request.StopServerRequest) (*upcloud.ServerDetails, error) {
+		if r.StopType != request.ServerStopTypeHard {
+			t.Errorf("StopType = %q, want hard", r.StopType)
+		}
+		stopped = append(stopped, r.UUID)
 		return &upcloud.ServerDetails{}, nil
 	}
-	mock.waitForServerState = func(_ context.Context, _ *request.WaitForServerStateRequest) (*upcloud.ServerDetails, error) {
-		return &upcloud.ServerDetails{}, nil
-	}
-	mock.deleteServerAndStorages = func(_ context.Context, _ *request.DeleteServerAndStoragesRequest) error {
-		return nil
-	}
+	// waitForServerState and deleteServerAndStorages intentionally left as
+	// panics: Decrease must not block on the stop; Update deletes the server
+	// once it is stopped.
 
 	g := baseGroup(mock)
 	instances := []string{"uuid-1", "uuid-2", "uuid-3"}
@@ -485,25 +706,24 @@ func TestDecrease_AllSucceed(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Decrease() unexpected error: %v", err)
 	}
-	if len(succeeded) != 3 {
-		t.Errorf("Decrease() succeeded = %d, want 3", len(succeeded))
+	slices.Sort(succeeded)
+	slices.Sort(stopped)
+	if !slices.Equal(succeeded, instances) || !slices.Equal(stopped, instances) {
+		t.Errorf("succeeded = %v, stopped = %v, want both %v", succeeded, stopped, instances)
+	}
+	if len(g.stopping) != 3 {
+		t.Errorf("stopping = %v, want all 3 tracked for Shutdown", g.stopping)
 	}
 }
 
 func TestDecrease_PartialFailure(t *testing.T) {
 	mock := newMockSvc()
-	mock.getServerDetails = startedDetails
+	mock.getServerDetails = detailsInState(upcloud.ServerStateStarted)
 	mock.stopServer = func(_ context.Context, r *request.StopServerRequest) (*upcloud.ServerDetails, error) {
 		if r.UUID == "uuid-bad" {
 			return nil, errors.New("stop failed")
 		}
 		return &upcloud.ServerDetails{}, nil
-	}
-	mock.waitForServerState = func(_ context.Context, _ *request.WaitForServerStateRequest) (*upcloud.ServerDetails, error) {
-		return &upcloud.ServerDetails{}, nil
-	}
-	mock.deleteServerAndStorages = func(_ context.Context, _ *request.DeleteServerAndStoragesRequest) error {
-		return nil
 	}
 
 	g := baseGroup(mock)
@@ -517,81 +737,87 @@ func TestDecrease_PartialFailure(t *testing.T) {
 	}
 }
 
-func TestDecrease_AlreadyStopped(t *testing.T) {
-	deleted := false
-	mock := newMockSvc()
-	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
-		return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateStopped}}, nil
-	}
-	// stopServer and waitForServerState intentionally left as panics:
-	// an already-stopped server must be deleted without a stop attempt.
-	mock.deleteServerAndStorages = func(_ context.Context, _ *request.DeleteServerAndStoragesRequest) error {
-		deleted = true
-		return nil
-	}
+func TestDecrease_StoppedOrErroredDeletedDirectly(t *testing.T) {
+	for _, state := range []string{upcloud.ServerStateStopped, upcloud.ServerStateError} {
+		t.Run(state, func(t *testing.T) {
+			deleted := false
+			mock := newMockSvc()
+			mock.getServerDetails = detailsInState(state)
+			// stopServer intentionally left as a panic: a stop attempt would fail.
+			mock.deleteServerAndStorages = func(context.Context, *request.DeleteServerAndStoragesRequest) error {
+				deleted = true
+				return nil
+			}
 
-	g := baseGroup(mock)
-	succeeded, err := g.Decrease(context.Background(), []string{"uuid-stopped"})
+			g := baseGroup(mock)
+			succeeded, err := g.Decrease(context.Background(), []string{"uuid-1"})
 
-	if err != nil {
-		t.Fatalf("Decrease() unexpected error: %v", err)
-	}
-	if !deleted {
-		t.Error("Decrease() did not delete the already-stopped server")
-	}
-	if len(succeeded) != 1 {
-		t.Errorf("Decrease() succeeded = %v, want [uuid-stopped]", succeeded)
+			if err != nil {
+				t.Fatalf("Decrease() unexpected error: %v", err)
+			}
+			if !deleted {
+				t.Error("Decrease() did not delete the server")
+			}
+			if len(succeeded) != 1 {
+				t.Errorf("Decrease() succeeded = %v, want [uuid-1]", succeeded)
+			}
+		})
 	}
 }
 
-func TestDecrease_ErrorState(t *testing.T) {
-	deleted := false
+func TestDecrease_DeleteFailure(t *testing.T) {
 	mock := newMockSvc()
-	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
-		return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateError}}, nil
-	}
-	// stopServer and waitForServerState intentionally left as panics:
-	// a server in the error state must be deleted without a stop attempt.
-	mock.deleteServerAndStorages = func(_ context.Context, _ *request.DeleteServerAndStoragesRequest) error {
-		deleted = true
-		return nil
+	mock.getServerDetails = detailsInState(upcloud.ServerStateStopped)
+	mock.deleteServerAndStorages = func(context.Context, *request.DeleteServerAndStoragesRequest) error {
+		return errors.New("delete failed")
 	}
 
 	g := baseGroup(mock)
-	succeeded, err := g.Decrease(context.Background(), []string{"uuid-error"})
-
-	if err != nil {
-		t.Fatalf("Decrease() unexpected error: %v", err)
-	}
-	if !deleted {
-		t.Error("Decrease() did not delete the error-state server")
-	}
-	if len(succeeded) != 1 {
-		t.Errorf("Decrease() succeeded = %v, want [uuid-error]", succeeded)
+	succeeded, err := g.Decrease(context.Background(), []string{"uuid-1"})
+	if err == nil || len(succeeded) != 0 {
+		t.Errorf("Decrease() = (%v, %v), want ([], error)", succeeded, err)
 	}
 }
 
-func TestDecrease_StopWaitHasDeadline(t *testing.T) {
+func TestDecrease_AlreadyGoneCountsAsRemoved(t *testing.T) {
+	t.Run("details 404", func(t *testing.T) {
+		mock := newMockSvc()
+		mock.getServerDetails = func(context.Context, *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+			return nil, notFound
+		}
+
+		g := baseGroup(mock)
+		succeeded, err := g.Decrease(context.Background(), []string{"uuid-1"})
+		if err != nil || len(succeeded) != 1 {
+			t.Errorf("Decrease() = (%v, %v), want ([uuid-1], nil)", succeeded, err)
+		}
+	})
+
+	t.Run("delete 404", func(t *testing.T) {
+		mock := newMockSvc()
+		mock.getServerDetails = detailsInState(upcloud.ServerStateStopped)
+		mock.deleteServerAndStorages = func(context.Context, *request.DeleteServerAndStoragesRequest) error {
+			return notFound
+		}
+
+		g := baseGroup(mock)
+		succeeded, err := g.Decrease(context.Background(), []string{"uuid-1"})
+		if err != nil || len(succeeded) != 1 {
+			t.Errorf("Decrease() = (%v, %v), want ([uuid-1], nil)", succeeded, err)
+		}
+	})
+}
+
+func TestDecrease_DetailsError(t *testing.T) {
 	mock := newMockSvc()
-	mock.getServerDetails = startedDetails
-	mock.stopServer = func(_ context.Context, _ *request.StopServerRequest) (*upcloud.ServerDetails, error) {
-		return &upcloud.ServerDetails{}, nil
-	}
-	var hadDeadline bool
-	mock.waitForServerState = func(ctx context.Context, _ *request.WaitForServerStateRequest) (*upcloud.ServerDetails, error) {
-		_, hadDeadline = ctx.Deadline()
-		return &upcloud.ServerDetails{}, nil
-	}
-	mock.deleteServerAndStorages = func(_ context.Context, _ *request.DeleteServerAndStoragesRequest) error {
-		return nil
+	mock.getServerDetails = func(context.Context, *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+		return nil, errors.New("api error")
 	}
 
 	g := baseGroup(mock)
-	if _, err := g.Decrease(context.Background(), []string{"uuid-1"}); err != nil {
-		t.Fatalf("Decrease() unexpected error: %v", err)
-	}
-	if !hadDeadline {
-		t.Error("WaitForServerState ctx has no deadline; an unresponsive server would hang Decrease forever")
+	succeeded, err := g.Decrease(context.Background(), []string{"uuid-1"})
+	if err == nil || len(succeeded) != 0 {
+		t.Errorf("Decrease() = (%v, %v), want ([], error)", succeeded, err)
 	}
 }
 
@@ -600,6 +826,137 @@ func TestDecrease_Empty(t *testing.T) {
 	succeeded, err := g.Decrease(context.Background(), nil)
 	if err != nil || len(succeeded) != 0 {
 		t.Errorf("Decrease(nil) = (%v, %v), want ([], nil)", succeeded, err)
+	}
+}
+
+// ─── Shutdown ─────────────────────────────────────────────────────────────────
+
+func TestShutdown_FinishesStoppedServers(t *testing.T) {
+	var deleted []string
+	var hadDeadline bool
+	mock := newMockSvc()
+	mock.getServerDetails = func(_ context.Context, r *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+		switch r.UUID {
+		case "uuid-stopping":
+			return &upcloud.ServerDetails{Server: upcloud.Server{State: "maintenance"}}, nil
+		case "uuid-stopped":
+			return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateStopped}}, nil
+		default:
+			return nil, notFound
+		}
+	}
+	mock.waitForServerState = func(ctx context.Context, r *request.WaitForServerStateRequest) (*upcloud.ServerDetails, error) {
+		if r.UUID != "uuid-stopping" {
+			t.Errorf("WaitForServerState called for %s, want only uuid-stopping", r.UUID)
+		}
+		_, hadDeadline = ctx.Deadline()
+		return &upcloud.ServerDetails{}, nil
+	}
+	mock.deleteServerAndStorages = func(_ context.Context, r *request.DeleteServerAndStoragesRequest) error {
+		deleted = append(deleted, r.UUID)
+		return nil
+	}
+
+	g := baseGroup(mock)
+	for _, uuid := range []string{"uuid-stopping", "uuid-stopped", "uuid-gone"} {
+		g.stopping[uuid] = struct{}{}
+	}
+
+	if err := g.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() unexpected error: %v", err)
+	}
+	slices.Sort(deleted)
+	if want := []string{"uuid-stopped", "uuid-stopping"}; !slices.Equal(deleted, want) {
+		t.Errorf("deleted = %v, want %v", deleted, want)
+	}
+	if !hadDeadline {
+		t.Error("WaitForServerState ctx has no deadline; an unresponsive server would hang Shutdown forever")
+	}
+	if g.ctx.Err() == nil {
+		t.Error("Shutdown() did not cancel the background context")
+	}
+}
+
+func TestShutdown_ReportsFailures(t *testing.T) {
+	mock := newMockSvc()
+	mock.getServerDetails = detailsInState(upcloud.ServerStateStopped)
+	mock.deleteServerAndStorages = func(context.Context, *request.DeleteServerAndStoragesRequest) error {
+		return errors.New("delete failed")
+	}
+
+	g := baseGroup(mock)
+	g.stopping["uuid-1"] = struct{}{}
+	if err := g.Shutdown(context.Background()); err == nil {
+		t.Error("Shutdown() expected error when a delete fails, got nil")
+	}
+}
+
+func TestShutdown_StopWaitFailure(t *testing.T) {
+	mock := newMockSvc()
+	mock.getServerDetails = detailsInState("maintenance")
+	mock.waitForServerState = func(context.Context, *request.WaitForServerStateRequest) (*upcloud.ServerDetails, error) {
+		return nil, context.DeadlineExceeded
+	}
+	// deleteServerAndStorages intentionally left as a panic: a server that
+	// never stopped must not be deleted.
+
+	g := baseGroup(mock)
+	g.stopping["uuid-1"] = struct{}{}
+	if err := g.Shutdown(context.Background()); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("Shutdown() error = %v, want it to wrap context.DeadlineExceeded", err)
+	}
+}
+
+func TestShutdown_WaitsForBackgroundDeletions(t *testing.T) {
+	release := make(chan struct{})
+	deleted := false
+	mock := newMockSvc()
+	mock.getServersWithFilters = listServers(upcloud.Server{UUID: "uuid-stopped", State: upcloud.ServerStateStopped})
+	mock.deleteServerAndStorages = func(context.Context, *request.DeleteServerAndStoragesRequest) error {
+		<-release
+		deleted = true
+		return nil
+	}
+
+	g := baseGroup(mock)
+	if err := g.Update(context.Background(), func(string, provider.State) {}); err != nil {
+		t.Fatalf("Update() unexpected error: %v", err)
+	}
+
+	done := make(chan error)
+	go func() { done <- g.Shutdown(context.Background()) }()
+
+	select {
+	case err := <-done:
+		t.Fatalf("Shutdown() returned (%v) while a background deletion was still running", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("Shutdown() unexpected error: %v", err)
+	}
+	if !deleted {
+		t.Error("background deletion did not complete")
+	}
+}
+
+func TestShutdown_ContextCancelled(t *testing.T) {
+	g := baseGroup(newMockSvc())
+	g.cleanups.Add(1) // a background deletion that never finishes
+	defer g.cleanups.Done()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := g.Shutdown(ctx); !errors.Is(err, context.Canceled) {
+		t.Errorf("Shutdown() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestShutdown_BeforeInit(t *testing.T) {
+	g := &InstanceGroup{}
+	if err := g.Shutdown(context.Background()); err != nil {
+		t.Errorf("Shutdown() on an uninitialized group = %v, want nil", err)
 	}
 }
 
@@ -689,6 +1046,27 @@ func TestConnectInfo_UsePrivateNetwork(t *testing.T) {
 	if info.ExternalAddr != "10.0.0.5" {
 		t.Errorf("ExternalAddr = %q, want private IP 10.0.0.5", info.ExternalAddr)
 	}
+	if info.InternalAddr != "10.0.0.5" {
+		t.Errorf("InternalAddr = %q, want 10.0.0.5", info.InternalAddr)
+	}
+}
+
+func TestConnectInfo_UsePrivateNetworkFallsBackToPublic(t *testing.T) {
+	mock := newMockSvc()
+	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
+		return makeDetails("1.2.3.4", ""), nil
+	}
+
+	g := baseGroup(mock)
+	g.UsePrivateNetwork = true
+	info, err := g.ConnectInfo(context.Background(), "uuid-1")
+
+	if err != nil {
+		t.Fatalf("ConnectInfo() unexpected error: %v", err)
+	}
+	if info.ExternalAddr != "1.2.3.4" {
+		t.Errorf("ExternalAddr = %q, want public IP 1.2.3.4", info.ExternalAddr)
+	}
 }
 
 func TestConnectInfo_APIError(t *testing.T) {
@@ -707,9 +1085,7 @@ func TestConnectInfo_APIError(t *testing.T) {
 
 func TestHeartbeat_HealthyServer(t *testing.T) {
 	mock := newMockSvc()
-	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
-		return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateStarted}}, nil
-	}
+	mock.getServerDetails = detailsInState(upcloud.ServerStateStarted)
 
 	g := baseGroup(mock)
 	if err := g.Heartbeat(context.Background(), "uuid-1"); err != nil {
@@ -717,15 +1093,17 @@ func TestHeartbeat_HealthyServer(t *testing.T) {
 	}
 }
 
-func TestHeartbeat_ErrorState(t *testing.T) {
-	mock := newMockSvc()
-	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
-		return &upcloud.ServerDetails{Server: upcloud.Server{State: upcloud.ServerStateError}}, nil
-	}
+func TestHeartbeat_UnhealthyStates(t *testing.T) {
+	for _, state := range []string{upcloud.ServerStateError, upcloud.ServerStateStopped} {
+		t.Run(state, func(t *testing.T) {
+			mock := newMockSvc()
+			mock.getServerDetails = detailsInState(state)
 
-	g := baseGroup(mock)
-	if err := g.Heartbeat(context.Background(), "uuid-1"); err == nil {
-		t.Error("Heartbeat() expected error for server in error state, got nil")
+			g := baseGroup(mock)
+			if err := g.Heartbeat(context.Background(), "uuid-1"); err == nil {
+				t.Errorf("Heartbeat() expected error for server in %s state, got nil", state)
+			}
+		})
 	}
 }
 
@@ -744,7 +1122,7 @@ func TestHeartbeat_APIErrorTreatedAsHealthy(t *testing.T) {
 func TestHeartbeat_NotFoundIsUnhealthy(t *testing.T) {
 	mock := newMockSvc()
 	mock.getServerDetails = func(_ context.Context, _ *request.GetServerDetailsRequest) (*upcloud.ServerDetails, error) {
-		return nil, &upcloud.Problem{Status: http.StatusNotFound, Title: "SERVER_NOT_FOUND"}
+		return nil, notFound
 	}
 
 	g := baseGroup(mock)
@@ -768,10 +1146,37 @@ func TestSuspendResume_NotSupported(t *testing.T) {
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
-func TestInit_InvalidSSHKey(t *testing.T) {
+// useMock makes Init use mock instead of the real UpCloud service.
+func useMock(t *testing.T, mock *mockSvc) {
+	t.Helper()
 	orig := newUpcloudService
-	newUpcloudService = func(_ *client.Client) upcloudSvc { return newMockSvc() }
-	defer func() { newUpcloudService = orig }()
+	newUpcloudService = func(_ *client.Client) upcloudSvc { return mock }
+	t.Cleanup(func() { newUpcloudService = orig })
+}
+
+// initMock returns a mock that accepts the credentials and template checks.
+func initMock() *mockSvc {
+	mock := newMockSvc()
+	mock.getAccount = func(context.Context) (*upcloud.Account, error) {
+		return &upcloud.Account{}, nil
+	}
+	mock.getStorageDetails = func(context.Context, *request.GetStorageDetailsRequest) (*upcloud.StorageDetails, error) {
+		return &upcloud.StorageDetails{}, nil
+	}
+	return mock
+}
+
+func TestInit_InvalidConfig(t *testing.T) {
+	useMock(t, newMockSvc())
+
+	g := &InstanceGroup{Token: "tok", Zone: "z", Name: "n"}
+	if _, err := g.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{}); err == nil {
+		t.Fatal("Init() expected error for missing template, got nil")
+	}
+}
+
+func TestInit_InvalidSSHKey(t *testing.T) {
+	useMock(t, newMockSvc())
 
 	g := &InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n"}
 	settings := provider.Settings{
@@ -782,15 +1187,38 @@ func TestInit_InvalidSSHKey(t *testing.T) {
 	}
 }
 
+func TestInit_DerivesPublicKey(t *testing.T) {
+	useMock(t, initMock())
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	g := &InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n"}
+	settings := provider.Settings{ConnectorConfig: provider.ConnectorConfig{Key: pem.EncodeToMemory(block)}}
+	if _, err := g.Init(context.Background(), hclog.NewNullLogger(), settings); err != nil {
+		t.Fatalf("Init() unexpected error: %v", err)
+	}
+	if want := string(ssh.MarshalAuthorizedKey(sshPub)); g.publicKey != want {
+		t.Errorf("publicKey = %q, want %q", g.publicKey, want)
+	}
+}
+
 func TestInit_GetAccountError(t *testing.T) {
 	mock := newMockSvc()
 	mock.getAccount = func(context.Context) (*upcloud.Account, error) {
 		return nil, errors.New("invalid credentials")
 	}
-
-	orig := newUpcloudService
-	newUpcloudService = func(_ *client.Client) upcloudSvc { return mock }
-	defer func() { newUpcloudService = orig }()
+	useMock(t, mock)
 
 	g := &InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n"}
 	if _, err := g.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{}); err == nil {
@@ -798,15 +1226,34 @@ func TestInit_GetAccountError(t *testing.T) {
 	}
 }
 
-func TestInit_Success(t *testing.T) {
-	mock := newMockSvc()
-	mock.getAccount = func(context.Context) (*upcloud.Account, error) {
-		return &upcloud.Account{}, nil
+func TestInit_TemplateNotFound(t *testing.T) {
+	mock := initMock()
+	mock.getStorageDetails = func(context.Context, *request.GetStorageDetailsRequest) (*upcloud.StorageDetails, error) {
+		return nil, &upcloud.Problem{Status: http.StatusNotFound, Title: "STORAGE_NOT_FOUND"}
 	}
+	useMock(t, mock)
 
-	orig := newUpcloudService
-	newUpcloudService = func(_ *client.Client) upcloudSvc { return mock }
-	defer func() { newUpcloudService = orig }()
+	g := &InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n"}
+	if _, err := g.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{}); err == nil {
+		t.Fatal("Init() expected error for a missing template, got nil")
+	}
+}
+
+func TestInit_TemplateCheckErrorOnlyWarns(t *testing.T) {
+	mock := initMock()
+	mock.getStorageDetails = func(context.Context, *request.GetStorageDetailsRequest) (*upcloud.StorageDetails, error) {
+		return nil, &upcloud.Problem{Status: http.StatusForbidden, Title: "FORBIDDEN"}
+	}
+	useMock(t, mock)
+
+	g := &InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n"}
+	if _, err := g.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{}); err != nil {
+		t.Fatalf("Init() unexpected error: %v", err)
+	}
+}
+
+func TestInit_Success(t *testing.T) {
+	useMock(t, initMock())
 
 	g := &InstanceGroup{Token: "tok", Zone: "fi-hel1", Template: "t", Name: "n"}
 	info, err := g.Init(context.Background(), hclog.NewNullLogger(), provider.Settings{})
@@ -817,7 +1264,13 @@ func TestInit_Success(t *testing.T) {
 	if info.MaxSize != defaultMaxSize {
 		t.Errorf("ProviderInfo.MaxSize = %d, want %d", info.MaxSize, defaultMaxSize)
 	}
-	if !strings.Contains(info.ID, "fi-hel1") {
-		t.Errorf("ProviderInfo.ID = %q, expected to contain zone", info.ID)
+	if info.ID != "upcloud/fi-hel1/n" {
+		t.Errorf("ProviderInfo.ID = %q, want upcloud/fi-hel1/n", info.ID)
+	}
+	if g.ctx == nil || g.stopping == nil || g.deleteAttempts == nil {
+		t.Error("Init() did not initialize background deletion state")
+	}
+	if err := g.Shutdown(context.Background()); err != nil {
+		t.Errorf("Shutdown() unexpected error: %v", err)
 	}
 }
