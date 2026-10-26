@@ -70,12 +70,13 @@ runner: TCfHVcDHi, plugin: fleeting-plugin-upcloud, path: /usr/local/bin/fleetin
 
 GitLab Runner starts the plugin once and keeps that process running, so installing a new binary has no effect until the runner restarts. Replacing the binary while the runner is running is safe.
 
-1. **One-time setup: make restarts graceful.** By default, stopping the `gitlab-runner` service aborts running jobs. GitLab [recommends](https://docs.gitlab.com/runner/commands/#signals) a systemd drop-in that stops the runner with `SIGQUIT` instead, which waits for running jobs to finish:
+1. **One-time setup: make restarts graceful.** By default, stopping the `gitlab-runner` service aborts running jobs. GitLab [recommends](https://docs.gitlab.com/runner/commands/#signals) a systemd drop-in that stops the runner with `SIGQUIT` instead, which waits for running jobs to finish. Also set `KillMode=mixed`. By default, systemd sends the stop signal to every process in the service, plugins included. The plugins then exit immediately, before the runner can ask them to delete instances, so `delete_instances_on_shutdown` has no effect. With `mixed`, only the runner gets the signal, and it shuts the plugins down itself:
 
    ```sh
    sudo mkdir -p /etc/systemd/system/gitlab-runner.service.d
-   printf '[Service]\nKillSignal=SIGQUIT\nTimeoutStopSec=infinity\n' | sudo tee /etc/systemd/system/gitlab-runner.service.d/kill.conf
+   printf '[Service]\nKillSignal=SIGQUIT\nKillMode=mixed\nTimeoutStopSec=infinity\n' | sudo tee /etc/systemd/system/gitlab-runner.service.d/kill.conf
    sudo systemctl daemon-reload
+   systemctl show gitlab-runner -p KillSignal -p KillMode   # expect KillSignal=3, KillMode=mixed
    ```
 
 2. **Install the new version** by re-running the [install script](#quick-install-recommended). It prints the old and new versions. Add `VERSION=vX.Y.Z` to pick a specific release.
@@ -197,12 +198,16 @@ Edit `/etc/gitlab-runner/config.toml`. Keep the fields `gitlab-runner register` 
 ```toml
 # At most max_instances × capacity_per_instance jobs can run at once.
 concurrent = 20
+# Seconds the runner gives plugins to clean up on shutdown (0 = default of 30,
+# which is tight for deleting instances).
+shutdown_timeout = 120
 
 [[runners]]
   name = "UpCloud GitLab Runner"
   url = "https://gitlab.com"
   token = "<filled in by gitlab-runner register>"
   executor = "docker-autoscaler"
+  request_concurrency = 2          # default 1 delays jobs while GitLab long-polls
 
   [runners.docker]
     image = "alpine:latest"
@@ -285,6 +290,7 @@ On each autoscaler cycle the plugin:
 - **`authenticating with UpCloud API` at startup:** the credentials are wrong or expired, or the request comes from an IP the token (or the account's API access settings) doesn't allow.
 - **`template … not found` at startup:** `template` doesn't match a storage UUID in your account. Check `upctl storage list --template`.
 - **Instances are created but jobs never start:** the runner can't reach them over SSH. Check that port 22 is reachable from the runner manager, that `key_path` and `username` are correct, and that the template has cloud-init (the image script installs it).
+- **`plugin process exited  error=exit status 2` when the runner stops**, followed by `decreasing instances` errors: systemd killed the plugins along with the runner. Add `KillMode=mixed` as described in [Upgrading](#upgrading). Instances left behind this way are removed after the next start.
 - **Leftover servers:** every server the plugin creates is titled `<title_prefix> - <hostname>` and labelled `fleeting-group=<name>` (shown by `upctl server show <uuid>`). List them by title with `upctl server list -o json | jq -r '.servers[] | select(.title | startswith("fleeting-plugin-upcloud")) | "\(.uuid) \(.state) \(.title)"'`.
 
 ## Development
