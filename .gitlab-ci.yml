@@ -22,18 +22,17 @@ variables:
   BINARY_NAME: "fleeting-plugin-upcloud"
   PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}"
   CGO_ENABLED: "0"
-  GIT_DEPTH: "0"
-  GIT_STRATEGY: clone
   # Keep mise tools and the Go module cache inside the project dir so they can be cached
   MISE_DATA_DIR: "$CI_PROJECT_DIR/.mise"
   GOPATH: "$CI_PROJECT_DIR/.go"
   # Trust mise.toml without an interactive prompt (idempotent, unlike `mise trust`)
   MISE_TRUSTED_CONFIG_PATHS: "$CI_PROJECT_DIR"
 
-# Toolchain comes from mise.toml (same as local dev)
+# Toolchain comes from mise.toml (same as local dev). Images are pinned to
+# exact tags (bumped by Renovate): a floating :latest can change under you.
 default:
   image:
-    name: ghcr.io/jdx/mise:latest
+    name: ghcr.io/jdx/mise:2026.10.19-debian
     entrypoint: [""]
   tags:
     - upcloud
@@ -41,10 +40,21 @@ default:
     - mise install
     - eval "$(mise env -s bash)"
   cache:
-    key: mise-toolchain
+    key:
+      files:
+        - mise.toml
+        - go.sum
     paths:
       - .mise
       - .go/pkg/mod
+
+# Build and release only for pushes to the default branch, not for scheduled
+# pipelines (which exist to run the vulnerability check).
+.release-rules:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
 
 # ──────────────────────────────────────────────
 # Init
@@ -56,9 +66,13 @@ default:
 bump-version:
   stage: init
   image:
-    name: registry.gitlab.com/go-semantic-release/semantic-release:latest
+    name: registry.gitlab.com/go-semantic-release/semantic-release:2.31.0
     entrypoint: [""]
   interruptible: true
+  variables:
+    # semantic-release needs the full history and tags
+    GIT_DEPTH: "0"
+    GIT_STRATEGY: clone
   before_script: []
   cache: []
   artifacts:
@@ -70,7 +84,10 @@ bump-version:
       dotenv: build.env
     expire_in: 1 week
   script:
-    - semantic-release --version-file --changelog CHANGELOG.md --dry || true
+    # --allow-no-changes exits 0 when nothing is releasable; any other
+    # failure (e.g. an API error) fails the job instead of silently
+    # skipping the release.
+    - semantic-release --version-file --changelog CHANGELOG.md --dry --allow-no-changes
     - export VERSION=$(cat .version-unreleased 2>/dev/null || echo "")
     - echo "VERSION=${VERSION}" > build.env
     - |
@@ -88,13 +105,29 @@ bump-version:
 test:
   stage: test
   needs: []
+  variables:
+    # The race detector needs cgo, and so a C compiler.
+    CGO_ENABLED: "1"
+    DEBIAN_FRONTEND: noninteractive
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
+    - mise install
+    - eval "$(mise env -s bash)"
   script:
     - mise run vet
     - mise run lint
     - mise run test
 
+# Also runs on a schedule (CI/CD > Schedules, e.g. weekly on the default
+# branch) so newly disclosed vulnerabilities surface without a push.
+vulncheck:
+  stage: test
+  needs: []
+  script:
+    - mise run vuln
+
 # ──────────────────────────────────────────────
-# Build (cross-compiled; darwin binaries are unsigned — sign locally after download)
+# Build (cross-compiled; Go's linker ad-hoc signs darwin/arm64 binaries)
 # ──────────────────────────────────────────────
 
 # No `changes:` filter: semantic-release considers any fix:/feat: commit
@@ -102,12 +135,16 @@ test:
 # must run whenever bump-version computes a VERSION.
 .build-common:
   stage: build
-  rules:
-    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+  extends: .release-rules
+  # Serialize with other pipelines' builds and releases, so two quick pushes
+  # can't upload binaries for the same computed version concurrently.
+  resource_group: release
   needs:
     - job: bump-version
       artifacts: true
     - job: test
+      artifacts: false
+    - job: vulncheck
       artifacts: false
   script:
     - |
@@ -115,8 +152,8 @@ test:
       DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
       BUILD_VERSION="${VERSION:-${CI_COMMIT_SHORT_SHA}}"
       LDFLAGS="-X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${COMMIT} -X main.buildDate=${DATE}"
-      GOOS=${TARGET_OS} GOARCH=amd64 go build -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-amd64/${BINARY_NAME}" .
-      GOOS=${TARGET_OS} GOARCH=arm64 go build -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-arm64/${BINARY_NAME}" .
+      GOOS=${TARGET_OS} GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-amd64/${BINARY_NAME}" .
+      GOOS=${TARGET_OS} GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-arm64/${BINARY_NAME}" .
     # Upload only for releasable versions: BUILD_VERSION falls back to the
     # commit SHA (always set), which used to push SHA-versioned binaries to
     # the package registry on every default-branch push.
@@ -156,15 +193,20 @@ build-darwin:
 
 # Creates the Git tag and GitLab release in one step using the version and
 # changelog from bump-version, then attaches the binaries as asset links.
-# Uses CI_JOB_TOKEN — no custom GITLAB_TOKEN required.
-# Skips gracefully when VERSION is empty (no releasable commits).
+# Uses glab (release-cli is deprecated) authenticated with CI_JOB_TOKEN via
+# CI auto-login — no custom GITLAB_TOKEN required. The `release:` keyword
+# isn't used because it can't be skipped when VERSION turns out empty.
 create-release:
   stage: release
-  image: registry.gitlab.com/gitlab-org/release-cli:latest
+  extends: .release-rules
+  image:
+    name: registry.gitlab.com/gitlab-org/cli:v1.124.0
+    entrypoint: [""]
+  resource_group: release
   before_script: []
   cache: []
-  rules:
-    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+  variables:
+    GLAB_ENABLE_CI_AUTOLOGIN: "true"
   needs:
     - job: bump-version
       artifacts: true
@@ -179,16 +221,22 @@ create-release:
         exit 0
       fi
 
-      release-cli create \
+      LINKS=""
+      for OS in linux darwin; do
+        for ARCH in amd64 arm64; do
+          for NAME in "${BINARY_NAME}-${OS}-${ARCH}" "${BINARY_NAME}-${OS}-${ARCH}.sha256"; do
+            case "$NAME" in
+              *.sha256) TYPE=other ;;
+              *) TYPE=package ;;
+            esac
+            LINKS="${LINKS:+${LINKS},}{\"name\":\"${NAME}\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${NAME}\",\"link_type\":\"${TYPE}\"}"
+          done
+        done
+      done
+
+      glab release create "v${VERSION}" \
+        --repo "${CI_PROJECT_PATH}" \
         --name "v${VERSION}" \
-        --tag-name "v${VERSION}" \
         --ref "${CI_COMMIT_SHA}" \
-        --description "CHANGELOG.md" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-linux-amd64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-amd64\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-linux-amd64.sha256\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-amd64.sha256\",\"link_type\":\"other\"}" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-linux-arm64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-arm64\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-linux-arm64.sha256\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-linux-arm64.sha256\",\"link_type\":\"other\"}" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-amd64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-amd64\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-amd64.sha256\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-amd64.sha256\",\"link_type\":\"other\"}" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-arm64\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-arm64\",\"link_type\":\"package\"}" \
-        --assets-link "{\"name\":\"${BINARY_NAME}-darwin-arm64.sha256\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${BINARY_NAME}-darwin-arm64.sha256\",\"link_type\":\"other\"}"
+        --notes-file CHANGELOG.md \
+        --assets-links "[${LINKS}]"
