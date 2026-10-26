@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # custom-image-debian13.sh
-# Combined setup + prepare script for Debian 13 GitLab Runner images
+# Combined setup + prepare script for Debian 13 docker-autoscaler instance
+# images. Instances only need Docker: the runner manager connects over SSH,
+# so GitLab Runner is deliberately not installed (instances must never
+# register themselves as runners).
 #
 # Usage:
 #   sudo ./custom-image-debian13.sh --setup            # only install & configure
@@ -26,19 +29,15 @@ if [[ -t 1 ]]; then
   RESET='\033[0m'
   BLUE='\033[1;34m'
   GREEN='\033[1;32m'
-  YELLOW='\033[1;33m'
-  RED='\033[1;31m'
 else
   BOLD=''
   RESET=''
   BLUE=''
   GREEN=''
-  YELLOW=''
-  RED=''
 fi
 
 # total steps — estimate for nicer banners (adjust if you add/remove steps)
-TOTAL_STEPS=21
+TOTAL_STEPS=19
 CURRENT_STEP=0
 step_width=78
 
@@ -67,9 +66,6 @@ next_step() {
 }
 
 info()   { printf -- "${GREEN}--> %s${RESET}\n" "$1"; }
-warn()   { printf -- "${YELLOW}⚠ %s${RESET}\n" "$1"; }
-error()  { printf -- "${RED}✖ %s${RESET}\n" "$1"; }
-log()    { printf -- '%s %s\n' "$(date --iso-8601=seconds)" "$*"; }
 
 safe_systemctl_stop() { systemctl stop "$1" 2>/dev/null || true; }
 safe_systemctl_enable_now() { systemctl enable --now "$1" 2>/dev/null || true; }
@@ -111,9 +107,9 @@ do_setup() {
   next_step "Installing Docker (official repository)"
   info "Adding Docker repo GPG key and apt source"
   mkdir -p /etc/apt/keyrings
-  curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+  curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --batch --yes --dearmor -o /etc/apt/keyrings/docker.gpg
   echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
-https://download.docker.com/linux/debian $(. /etc/os-release && echo $VERSION_CODENAME) stable" \
+https://download.docker.com/linux/debian $(. /etc/os-release && echo "$VERSION_CODENAME") stable" \
     > /etc/apt/sources.list.d/docker.list
 
   info "Updating apt and installing docker-ce, containerd, buildx, compose plugin"
@@ -150,13 +146,6 @@ EOF
     usermod -aG docker "${SUDO_USER}" || true
   fi
 
-  next_step "Install GitLab Runner package (do NOT register)"
-  info "Adding gitlab-runner repository and installing package"
-  curl -fsSL https://packages.gitlab.com/install/repositories/runner/gitlab-runner/script.deb.sh | bash
-  apt update -y
-  apt install -y --no-install-recommends gitlab-runner || true
-  safe_systemctl_enable_now gitlab-runner || true
-
   next_step "Ensure cloud-init & SSH host keys"
   info "cloud-init status (non-fatal)"
   cloud-init status --long || true
@@ -167,17 +156,12 @@ EOF
   chmod 644 /etc/ssh/*pub 2>/dev/null || true
   chmod 600 /etc/ssh/ssh_host_* 2>/dev/null || true
 
-  next_step "Clean baked runner config (if any) and verify"
-  if [[ -f /etc/gitlab-runner/config.toml ]]; then
-    info "Removing /etc/gitlab-runner/config.toml to avoid baking registration"
-    rm -f /etc/gitlab-runner/config.toml || true
-  fi
-
-  info "Quick verification: docker & gitlab-runner versions"
-  docker --version || true
+  next_step "Verify Docker"
+  info "Docker versions (fails the run if Docker is unusable)"
+  docker --version
+  docker info >/dev/null
   docker buildx version || true
   docker compose version || true
-  gitlab-runner --version || true
 
   next_step "Setup finished"
   info "Setup steps completed — continue interactive config if needed"
@@ -188,15 +172,17 @@ EOF
 # ---------------------------
 do_prepare() {
   next_step "Stopping services to avoid writes"
-  info "Stopping gitlab-runner and docker (if running)"
-  safe_systemctl_stop gitlab-runner
+  info "Stopping docker (if running)"
+  safe_systemctl_stop docker.socket
   safe_systemctl_stop docker
 
-  next_step "Remove GitLab Runner config & SSH host keys"
-  info "Removing /etc/gitlab-runner/config.toml"
-  rm -f /etc/gitlab-runner/config.toml 2>/dev/null || true
-  info "Removing SSH host keys (they will be re-generated at first boot)"
+  next_step "Remove SSH host keys"
+  info "Removing SSH host keys (cloud-init regenerates them on first boot)"
   rm -f /etc/ssh/ssh_host_* 2>/dev/null || true
+
+  next_step "Reset cloud-init"
+  info "Clearing cloud-init state so every clone runs it as a new instance"
+  cloud-init clean --logs --seed || true
 
   next_step "Remove authorized_keys and clear machine-id"
   info "Removing root and home authorized_keys"
@@ -279,7 +265,7 @@ case "${MODE}" in
   --help)
     cat <<'USAGE'
 Usage: custom-image-debian13.sh [--setup|--prepare|--all] [--poweroff]
-  --setup      Install & configure packages (Docker, gitlab-runner, locales, cloud-init)
+  --setup      Install & configure packages (Docker, locales, cloud-init)
   --prepare    Final pre-image cleanup: remove keys, logs, caches, zero free space (no shutdown)
   --all        Run setup then prepare (default)
   --poweroff   Power off the machine at the end of a successful run
