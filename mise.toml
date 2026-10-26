@@ -5,8 +5,10 @@
 # Build
 go = "1.26.10"
 
-# Lint
+# Lint and test reporting
 golangci-lint = "2.15.0"
+shellcheck = "0.11.0"
+gotestsum = "1.13.0"
 
 # Used by the template-creation workflow in README.md
 jq = "1.8.2"
@@ -51,6 +53,11 @@ GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o 
 description = "Build for all common platforms into bin/<os>-<arch>/"
 depends = ["build-linux", "build-mac"]
 
+# What CI publishes: every release target under its asset name, plus checksums.
+[tasks.dist]
+description = "Build all release binaries with .sha256 files into dist/"
+run = "scripts/build-dist.sh"
+
 # Built with an explicit -o: `go install` would name the binary after the
 # module path (gitlab-fleeting-plugin-upcloud), breaking runner discovery,
 # which requires the fleeting-plugin-<name> convention.
@@ -66,6 +73,16 @@ description = "Run tests with the race detector"
 env = { CGO_ENABLED = "1" }
 run = "go test -race ./..."
 
+# CI variant of `test`: JUnit report for the merge request widget, and the
+# total coverage line CI parses.
+[tasks.test-report]
+description = "Run tests with the race detector, writing report.xml and coverage.out"
+env = { CGO_ENABLED = "1" }
+run = [
+  "gotestsum --junitfile report.xml --format testname -- -race -coverprofile=coverage.out ./...",
+  "go tool cover -func=coverage.out | tail -1",
+]
+
 # Opt-in: creates (and deletes) real, billed UpCloud servers. See integration_test.go.
 [tasks.test-integration]
 description = "Run the fleeting conformance test against real UpCloud servers"
@@ -79,14 +96,18 @@ run = ["go vet ./...", "go vet -tags integration ./..."]
 description = "Run golangci-lint"
 run = "golangci-lint run ./..."
 
+[tasks.lint-shell]
+description = "Run shellcheck on the shell scripts"
+run = "shellcheck scripts/*.sh"
+
 [tasks.vuln]
 description = "Check dependencies and the Go toolchain for known vulnerabilities"
 run = "go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./..."
 
 [tasks.check]
-description = "Run everything CI runs: vet, lint, test, vuln"
-depends = ["vet", "lint", "test", "vuln"]
+description = "Run the main CI checks: vet, lint, lint-shell, test, vuln"
+depends = ["vet", "lint", "lint-shell", "test", "vuln"]
 
 [tasks.clean]
 description = "Remove build artifacts"
-run = "rm -rf bin/"
+run = "rm -rf bin/ dist/ report.xml coverage.out"

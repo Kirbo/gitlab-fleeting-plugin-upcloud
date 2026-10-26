@@ -3,6 +3,10 @@ stages:
   - test
   - build
   - release
+  - verify
+
+include:
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
 
 workflow:
   rules:
@@ -22,9 +26,12 @@ variables:
   BINARY_NAME: "fleeting-plugin-upcloud"
   PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}"
   CGO_ENABLED: "0"
-  # Keep mise tools and the Go module cache inside the project dir so they can be cached
+  # Keep mise tools and the Go module, build and lint caches inside the
+  # project dir so they can be cached
   MISE_DATA_DIR: "$CI_PROJECT_DIR/.mise"
   GOPATH: "$CI_PROJECT_DIR/.go"
+  GOCACHE: "$CI_PROJECT_DIR/.go/cache"
+  GOLANGCI_LINT_CACHE: "$CI_PROJECT_DIR/.golangci-cache"
   # Trust mise.toml without an interactive prompt (idempotent, unlike `mise trust`)
   MISE_TRUSTED_CONFIG_PATHS: "$CI_PROJECT_DIR"
 
@@ -36,6 +43,8 @@ default:
     entrypoint: [""]
   tags:
     - upcloud
+  # A newer push makes running checks pointless; release jobs opt out.
+  interruptible: true
   before_script:
     - mise install
     - eval "$(mise env -s bash)"
@@ -47,9 +56,11 @@ default:
     paths:
       - .mise
       - .go/pkg/mod
+      - .go/cache
+      - .golangci-cache
 
-# Build and release only for pushes to the default branch, not for scheduled
-# pipelines (which exist to run the vulnerability check).
+# Release only from pushes to the default branch, not from scheduled
+# pipelines (which exist to run the checks, e.g. vulncheck).
 .release-rules:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
@@ -65,10 +76,10 @@ default:
 # as a CI variable. VERSION is empty when there are no releasable commits.
 bump-version:
   stage: init
+  extends: .release-rules
   image:
     name: registry.gitlab.com/go-semantic-release/semantic-release:2.31.0
     entrypoint: [""]
-  interruptible: true
   variables:
     # semantic-release needs the full history and tags
     GIT_DEPTH: "0"
@@ -116,7 +127,13 @@ test:
   script:
     - mise run vet
     - mise run lint
-    - mise run test
+    - mise run test-report
+  coverage: '/total:\s+\(statements\)\s+(\d+\.\d+)%/'
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+    expire_in: 1 week
 
 # Also runs on a schedule (CI/CD > Schedules, e.g. weekly on the default
 # branch) so newly disclosed vulnerabilities surface without a push.
@@ -126,82 +143,106 @@ vulncheck:
   script:
     - mise run vuln
 
+shellcheck:
+  stage: test
+  needs: []
+  script:
+    - mise run lint-shell
+
+psscriptanalyzer:
+  stage: test
+  needs: []
+  image: mcr.microsoft.com/powershell:7.5-ubuntu-24.04
+  variables:
+    PSSCRIPTANALYZER_VERSION: "1.25.0"
+  before_script: []
+  cache: []
+  script:
+    - |
+      pwsh -NoProfile -NonInteractive -Command '
+        $ErrorActionPreference = "Stop"
+        Install-Module PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION -Scope CurrentUser -Force
+        $findings = Invoke-ScriptAnalyzer -Path scripts -Recurse
+        $findings | Format-Table -AutoSize Severity, RuleName, ScriptName, Line, Message | Out-String -Width 200
+        if ($findings) { exit 1 }
+        "PSScriptAnalyzer: no findings"'
+
+# From the Secret-Detection template; it brings its own image and tooling.
+secret_detection:
+  before_script: []
+  cache: []
+
+# Fleeting's conformance test against real, billed UpCloud servers. Shows up
+# as a manual job once the UPCLOUD_* CI/CD variables are set (UPCLOUD_SSH_KEY
+# as a File variable holding the private key); see integration_test.go.
+integration:
+  stage: test
+  needs: []
+  rules:
+    - if: '$UPCLOUD_TOKEN && $UPCLOUD_ZONE && $UPCLOUD_TEMPLATE && $UPCLOUD_SSH_KEY'
+      when: manual
+  allow_failure: true
+  # Cancelling mid-run would leave its servers behind.
+  interruptible: false
+  resource_group: integration
+  script:
+    - mise run test-integration
+
 # ──────────────────────────────────────────────
-# Build (cross-compiled; Go's linker ad-hoc signs darwin/arm64 binaries)
+# Build
 # ──────────────────────────────────────────────
 
-# No `changes:` filter: semantic-release considers any fix:/feat: commit
-# releasable (including ones that only touch scripts or CI), so build+release
-# must run whenever bump-version computes a VERSION.
-.build-common:
+# Builds every release binary with checksums into dist/, on merge requests
+# too (catching cross-compile breakage before it reaches main), and checks
+# that the binary for this host runs and reports the right version.
+# Nothing is uploaded here: the release job publishes dist/ only after
+# every target has built, so a release is never published half-built.
+build:
   stage: build
-  extends: .release-rules
-  # Serialize with other pipelines' builds and releases, so two quick pushes
-  # can't upload binaries for the same computed version concurrently.
-  resource_group: release
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - when: on_success
   needs:
     - job: bump-version
       artifacts: true
+      optional: true
     - job: test
       artifacts: false
     - job: vulncheck
       artifacts: false
   script:
+    - export BUILD_VERSION="${VERSION:-${CI_COMMIT_SHORT_SHA}}" BUILD_COMMIT="${CI_COMMIT_SHORT_SHA}"
+    - mise run dist
+    - (cd dist && sha256sum -c ./*.sha256)
     - |
-      COMMIT="${CI_COMMIT_SHORT_SHA}"
-      DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-      BUILD_VERSION="${VERSION:-${CI_COMMIT_SHORT_SHA}}"
-      LDFLAGS="-X main.buildVersion=${BUILD_VERSION} -X main.buildCommit=${COMMIT} -X main.buildDate=${DATE}"
-      GOOS=${TARGET_OS} GOARCH=amd64 go build -trimpath -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-amd64/${BINARY_NAME}" .
-      GOOS=${TARGET_OS} GOARCH=arm64 go build -trimpath -ldflags "${LDFLAGS}" -o "bin/${TARGET_OS}-arm64/${BINARY_NAME}" .
-    # Upload only for releasable versions: BUILD_VERSION falls back to the
-    # commit SHA (always set), which used to push SHA-versioned binaries to
-    # the package registry on every default-branch push.
-    - |
-      if [ -n "${VERSION}" ]; then
-        for GOARCH in amd64 arm64; do
-          ASSET="${BINARY_NAME}-${TARGET_OS}-${GOARCH}"
-          BIN="bin/${TARGET_OS}-${GOARCH}/${BINARY_NAME}"
-          sha256sum "${BIN}" | awk -v name="${ASSET}" '{print $1 "  " name}' > "${BIN}.sha256"
-          echo "Uploading ${ASSET}..."
-          curl --fail --silent --show-error \
-            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-            --upload-file "${BIN}" \
-            "${PACKAGE_REGISTRY_URL}/${VERSION}/${ASSET}"
-          curl --fail --silent --show-error \
-            --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
-            --upload-file "${BIN}.sha256" \
-            "${PACKAGE_REGISTRY_URL}/${VERSION}/${ASSET}.sha256"
-        done
-      else
-        echo "VERSION is empty — no releasable commits. Skipping upload."
-      fi
-
-build-linux:
-  extends: .build-common
-  variables:
-    TARGET_OS: linux
-
-build-darwin:
-  extends: .build-common
-  variables:
-    TARGET_OS: darwin
+      HOST_BIN="dist/${BINARY_NAME}-$(go env GOOS)-$(go env GOARCH)"
+      "${HOST_BIN}" version
+      "${HOST_BIN}" version | grep -Eq "^Version:[[:space:]]+${BUILD_VERSION}\$" \
+        || { echo "Expected version ${BUILD_VERSION} in ${HOST_BIN}" >&2; exit 1; }
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 1 week
 
 # ──────────────────────────────────────────────
 # Release
 # ──────────────────────────────────────────────
 
-# Creates the Git tag and GitLab release in one step using the version and
-# changelog from bump-version, then attaches the binaries as asset links.
-# Uses glab (release-cli is deprecated) authenticated with CI_JOB_TOKEN via
-# CI auto-login — no custom GITLAB_TOKEN required. The `release:` keyword
-# isn't used because it can't be skipped when VERSION turns out empty.
-create-release:
+# Uploads dist/ to the generic package registry, then creates the Git tag and
+# GitLab release with the binaries as asset links, using the version and
+# changelog from bump-version. glab (release-cli is deprecated) authenticates
+# with CI_JOB_TOKEN via CI auto-login. The `release:` keyword isn't used
+# because it can't be skipped when VERSION turns out empty.
+release:
   stage: release
   extends: .release-rules
   image:
     name: registry.gitlab.com/gitlab-org/cli:v1.124.0
     entrypoint: [""]
+  interruptible: false
+  # Serialize with other pipelines' releases, so two quick pushes can't
+  # publish the same computed version concurrently.
   resource_group: release
   before_script: []
   cache: []
@@ -210,10 +251,8 @@ create-release:
   needs:
     - job: bump-version
       artifacts: true
-    - job: build-linux
-      artifacts: false
-    - job: build-darwin
-      artifacts: false
+    - job: build
+      artifacts: true
   script:
     - |
       if [ -z "$VERSION" ]; then
@@ -221,17 +260,21 @@ create-release:
         exit 0
       fi
 
+      apk add --no-cache curl >/dev/null
+
       LINKS=""
-      for OS in linux darwin; do
-        for ARCH in amd64 arm64; do
-          for NAME in "${BINARY_NAME}-${OS}-${ARCH}" "${BINARY_NAME}-${OS}-${ARCH}.sha256"; do
-            case "$NAME" in
-              *.sha256) TYPE=other ;;
-              *) TYPE=package ;;
-            esac
-            LINKS="${LINKS:+${LINKS},}{\"name\":\"${NAME}\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${NAME}\",\"link_type\":\"${TYPE}\"}"
-          done
-        done
+      for FILE in dist/*; do
+        NAME="$(basename "$FILE")"
+        echo "Uploading ${NAME}..."
+        curl --fail --silent --show-error \
+          --header "JOB-TOKEN: ${CI_JOB_TOKEN}" \
+          --upload-file "$FILE" \
+          "${PACKAGE_REGISTRY_URL}/${VERSION}/${NAME}" >/dev/null
+        case "$NAME" in
+          *.sha256) TYPE=other ;;
+          *) TYPE=package ;;
+        esac
+        LINKS="${LINKS:+${LINKS},}{\"name\":\"${NAME}\",\"url\":\"${PACKAGE_REGISTRY_URL}/${VERSION}/${NAME}\",\"link_type\":\"${TYPE}\"}"
       done
 
       glab release create "v${VERSION}" \
@@ -240,3 +283,39 @@ create-release:
         --ref "${CI_COMMIT_SHA}" \
         --notes-file CHANGELOG.md \
         --assets-links "[${LINKS}]"
+
+# ──────────────────────────────────────────────
+# Verify
+# ──────────────────────────────────────────────
+
+# Installs the new release the way users do (pinned, and via the "latest"
+# permalink) and checks the installed version, catching broken asset links
+# or checksums before users hit them.
+verify-release:
+  stage: verify
+  extends: .release-rules
+  needs:
+    - job: bump-version
+      artifacts: true
+    - job: release
+      artifacts: false
+  before_script: []
+  cache: []
+  script:
+    - |
+      if [ -z "$VERSION" ]; then
+        echo "VERSION is empty — nothing was released."
+        exit 0
+      fi
+
+      check() {
+        "$1" version
+        "$1" version | grep -Eq "^Version:[[:space:]]+${VERSION}\$" \
+          || { echo "Expected version ${VERSION} from $1" >&2; exit 1; }
+      }
+
+      VERSION="v${VERSION}" INSTALL_PATH="${CI_PROJECT_DIR}/verify/pinned/${BINARY_NAME}" bash scripts/install-plugin.sh
+      check "${CI_PROJECT_DIR}/verify/pinned/${BINARY_NAME}"
+
+      env -u VERSION INSTALL_PATH="${CI_PROJECT_DIR}/verify/latest/${BINARY_NAME}" bash scripts/install-plugin.sh
+      check "${CI_PROJECT_DIR}/verify/latest/${BINARY_NAME}"

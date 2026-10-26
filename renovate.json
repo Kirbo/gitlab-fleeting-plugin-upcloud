@@ -1,32 +1,51 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": ["config:recommended", ":semanticCommits"],
-  "schedule": ["before 6am on monday"],
-  "postUpdateOptions": ["gomodTidy"],
+  "extends": [
+    "config:recommended",
+    ":semanticCommits"
+  ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "postUpdateOptions": [
+    "gomodTidy"
+  ],
   "packageRules": [
     {
       "description": "Go modules and the Go toolchain end up in the released binary: use fix(deps) so semantic-release publishes a patched release",
-      "matchManagers": ["gomod"],
+      "matchManagers": [
+        "gomod"
+      ],
       "semanticCommitType": "fix",
       "semanticCommitScope": "deps"
     },
     {
       "description": "Keep the Go toolchain in mise.toml and go.mod in lockstep, released like other runtime dependencies",
-      "matchPackageNames": ["go", "golang"],
+      "matchPackageNames": [
+        "go",
+        "golang"
+      ],
       "groupName": "Go toolchain",
       "semanticCommitType": "fix",
       "semanticCommitScope": "deps"
     },
     {
       "description": "CI images don't affect the released binary",
-      "matchManagers": ["gitlabci"],
+      "matchManagers": [
+        "gitlabci"
+      ],
       "semanticCommitType": "ci",
       "semanticCommitScope": "deps"
     },
     {
       "description": "Developer tools (linters, CLIs) don't affect the released binary",
-      "matchManagers": ["mise", "custom.regex"],
-      "matchPackageNames": ["!go"],
+      "matchManagers": [
+        "mise",
+        "custom.regex"
+      ],
+      "matchPackageNames": [
+        "!go"
+      ],
       "semanticCommitType": "build",
       "semanticCommitScope": "deps"
     }
@@ -35,10 +54,27 @@
     {
       "customType": "regex",
       "description": "govulncheck version used by the `vuln` mise task",
-      "managerFilePatterns": ["/^mise\\.toml$/"],
-      "matchStrings": ["GOVULNCHECK_VERSION = \"(?<currentValue>v[^\"]+)\""],
+      "managerFilePatterns": [
+        "/^mise\\.toml$/"
+      ],
+      "matchStrings": [
+        "GOVULNCHECK_VERSION = \"(?<currentValue>v[^\"]+)\""
+      ],
       "depNameTemplate": "golang.org/x/vuln",
       "datasourceTemplate": "go"
+    },
+    {
+      "customType": "regex",
+      "description": "PSScriptAnalyzer version used by the psscriptanalyzer CI job",
+      "managerFilePatterns": [
+        "/^\\.gitlab-ci\\.yml$/"
+      ],
+      "matchStrings": [
+        "PSSCRIPTANALYZER_VERSION: \"(?<currentValue>[^\"]+)\""
+      ],
+      "depNameTemplate": "PSScriptAnalyzer",
+      "datasourceTemplate": "nuget",
+      "registryUrlTemplate": "https://www.powershellgallery.com/api/v2/"
     }
   ]
 }
