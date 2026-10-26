@@ -1,14 +1,20 @@
 # Developer toolchain — install everything with `mise install`
+# Versions are pinned exactly (bumped by Renovate) so local builds, CI and
+# release binaries all use the same, patched toolchain.
 [tools]
 # Build
-go = "1.26"
+go = "1.26.10"
 
 # Lint
-golangci-lint = "latest"
+golangci-lint = "2.15.0"
 
 # Used by the template-creation workflow in README.md
-jq = "latest"
-upctl = "latest"
+jq = "1.8.2"
+upctl = "3.37.0"
+
+[env]
+# Version of golang.org/x/vuln used by the `vuln` task
+GOVULNCHECK_VERSION = "v1.9.0"
 
 # Tasks — run with `mise run <task>` (list them with `mise tasks`).
 # Version metadata comes from scripts/ldflags.sh.
@@ -16,8 +22,8 @@ upctl = "latest"
 [tasks.build]
 description = "Build the plugin binary into bin/ (ad-hoc signs it on macOS)"
 run = """
-go build -ldflags "$(scripts/ldflags.sh)" -o bin/fleeting-plugin-upcloud .
-[ "$(uname -s)" != "Darwin" ] || codesign --sign - bin/fleeting-plugin-upcloud
+go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o bin/fleeting-plugin-upcloud .
+[ "$(uname -s)" != "Darwin" ] || codesign --force --sign - bin/fleeting-plugin-upcloud
 """
 
 [tasks.deploy]
@@ -28,17 +34,17 @@ run = "sudo install -m 0755 bin/fleeting-plugin-upcloud /usr/local/bin/fleeting-
 [tasks.build-linux]
 description = "Build for Linux (amd64 and arm64) into bin/linux-<arch>/"
 run = """
-GOOS=linux GOARCH=amd64 go build -ldflags "$(scripts/ldflags.sh)" -o bin/linux-amd64/fleeting-plugin-upcloud .
-GOOS=linux GOARCH=arm64 go build -ldflags "$(scripts/ldflags.sh)" -o bin/linux-arm64/fleeting-plugin-upcloud .
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o bin/linux-amd64/fleeting-plugin-upcloud .
+GOOS=linux GOARCH=arm64 go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o bin/linux-arm64/fleeting-plugin-upcloud .
 """
 
 [tasks.build-mac]
 description = "Build for macOS (amd64 and arm64) into bin/darwin-<arch>/ (ad-hoc signs on a macOS host)"
 run = """
-GOOS=darwin GOARCH=amd64 go build -ldflags "$(scripts/ldflags.sh)" -o bin/darwin-amd64/fleeting-plugin-upcloud .
-GOOS=darwin GOARCH=arm64 go build -ldflags "$(scripts/ldflags.sh)" -o bin/darwin-arm64/fleeting-plugin-upcloud .
-[ "$(uname -s)" != "Darwin" ] || codesign --sign - bin/darwin-amd64/fleeting-plugin-upcloud
-[ "$(uname -s)" != "Darwin" ] || codesign --sign - bin/darwin-arm64/fleeting-plugin-upcloud
+GOOS=darwin GOARCH=amd64 go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o bin/darwin-amd64/fleeting-plugin-upcloud .
+GOOS=darwin GOARCH=arm64 go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o bin/darwin-arm64/fleeting-plugin-upcloud .
+[ "$(uname -s)" != "Darwin" ] || codesign --force --sign - bin/darwin-amd64/fleeting-plugin-upcloud
+[ "$(uname -s)" != "Darwin" ] || codesign --force --sign - bin/darwin-arm64/fleeting-plugin-upcloud
 """
 
 [tasks.build-all]
@@ -51,20 +57,35 @@ depends = ["build-linux", "build-mac"]
 [tasks.install]
 description = "Install the binary to $GOPATH/bin (makes it available on $PATH)"
 run = """
-go build -ldflags "$(scripts/ldflags.sh)" -o "$(go env GOPATH)/bin/fleeting-plugin-upcloud" .
+go build -trimpath -ldflags "$(scripts/ldflags.sh)" -o "$(go env GOPATH)/bin/fleeting-plugin-upcloud" .
 """
 
+# The race detector needs cgo (and so a C compiler).
 [tasks.test]
-description = "Run tests"
-run = "go test ./..."
+description = "Run tests with the race detector"
+env = { CGO_ENABLED = "1" }
+run = "go test -race ./..."
+
+# Opt-in: creates (and deletes) real, billed UpCloud servers. See integration_test.go.
+[tasks.test-integration]
+description = "Run the fleeting conformance test against real UpCloud servers"
+run = "go test -tags integration -run TestIntegration -count=1 -timeout 30m -v ./..."
 
 [tasks.vet]
 description = "Run go vet"
-run = "go vet ./..."
+run = ["go vet ./...", "go vet -tags integration ./..."]
 
 [tasks.lint]
 description = "Run golangci-lint"
 run = "golangci-lint run ./..."
+
+[tasks.vuln]
+description = "Check dependencies and the Go toolchain for known vulnerabilities"
+run = "go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./..."
+
+[tasks.check]
+description = "Run everything CI runs: vet, lint, test, vuln"
+depends = ["vet", "lint", "test", "vuln"]
 
 [tasks.clean]
 description = "Remove build artifacts"

@@ -1,0 +1,30 @@
+# golangci-lint v2 configuration. Run with `mise run lint`.
+version: "2"
+
+run:
+  # Also lint the opt-in integration test.
+  build-tags:
+    - integration
+
+linters:
+  # standard = errcheck, govet, ineffassign, staticcheck, unused
+  default: standard
+  enable:
+    - errorlint   # errors.Is/As instead of == and type assertions on wrapped errors
+    - gocritic
+    - gosec
+    - misspell
+    - revive
+    - unconvert
+  settings:
+    revive:
+      rules:
+        # Every exported identifier here implements the fleeting interface or
+        # is wired up by main; doc comments are welcome but not mandatory.
+        - name: exported
+          disabled: true
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
