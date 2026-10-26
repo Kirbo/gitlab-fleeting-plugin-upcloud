@@ -202,6 +202,15 @@ func TestValidate(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "use_private_network without network",
+			g:       InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", UsePrivateNetwork: true},
+			wantErr: true,
+		},
+		{
+			name: "use_private_network with network",
+			g:    InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", UsePrivateNetwork: true, Network: "net-uuid"},
+		},
+		{
 			name: "valid storage tier",
 			g:    InstanceGroup{Token: "tok", Zone: "z", Template: "t", Name: "n", StorageTier: "maxiops"},
 		},
@@ -573,6 +582,31 @@ func TestIncrease_CreateRequest(t *testing.T) {
 	ifaces := req.Networking.Interfaces
 	if len(ifaces) != 1 || ifaces[0].Type != upcloud.NetworkTypePublic {
 		t.Errorf("interfaces = %+v, want a single public interface", ifaces)
+	}
+}
+
+func TestIncrease_AttachesPrivateNetwork(t *testing.T) {
+	var req *request.CreateServerRequest
+	mock := newMockSvc()
+	mock.createServer = func(_ context.Context, r *request.CreateServerRequest) (*upcloud.ServerDetails, error) {
+		req = r
+		return &upcloud.ServerDetails{}, nil
+	}
+
+	g := baseGroup(mock)
+	g.Network = "net-uuid"
+	g.UsePrivateNetwork = true
+	if _, err := g.Increase(context.Background(), 1); err != nil {
+		t.Fatalf("Increase() unexpected error: %v", err)
+	}
+
+	ifaces := req.Networking.Interfaces
+	if len(ifaces) != 2 {
+		t.Fatalf("interfaces = %+v, want public + private", ifaces)
+	}
+	// UpCloud rejects private interfaces without a network UUID.
+	if ifaces[1].Type != upcloud.NetworkTypePrivate || ifaces[1].Network != "net-uuid" {
+		t.Errorf("private interface = %+v, want type private on net-uuid", ifaces[1])
 	}
 }
 

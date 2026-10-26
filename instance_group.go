@@ -81,6 +81,7 @@ type InstanceGroup struct {
 	NamePrefix        string `json:"name_prefix"`         // hostname prefix, default: "fleeting"
 	TitlePrefix       string `json:"title_prefix"`        // server title prefix, default: "fleeting-plugin-upcloud"
 	MaxSize           int    `json:"max_size"`            // default: 100
+	Network           string `json:"network"`             // private network UUID to attach; required by use_private_network
 	UsePrivateNetwork bool   `json:"use_private_network"` // default: false (use public IP)
 	UserData          string `json:"user_data"`           // optional: URL or script body for server initialization
 
@@ -119,6 +120,9 @@ func (g *InstanceGroup) validate() error {
 	}
 	if g.Name == "" {
 		return fmt.Errorf("name is required")
+	}
+	if g.UsePrivateNetwork && g.Network == "" {
+		return fmt.Errorf("network (a private network UUID) is required when use_private_network is true")
 	}
 	switch g.StorageTier {
 	case "", upcloud.StorageTierMaxIOPS, upcloud.StorageTierStandard, upcloud.StorageTierHDD:
@@ -380,12 +384,14 @@ func (g *InstanceGroup) createServer(ctx context.Context) error {
 		},
 	}
 
-	if g.UsePrivateNetwork {
+	// UpCloud requires the network UUID for private interfaces.
+	if g.Network != "" {
 		networking.Interfaces = append(networking.Interfaces, request.CreateServerInterface{
 			IPAddresses: request.CreateServerIPAddressSlice{
 				{Family: upcloud.IPAddressFamilyIPv4},
 			},
-			Type: upcloud.NetworkTypePrivate,
+			Type:    upcloud.NetworkTypePrivate,
+			Network: g.Network,
 		})
 	}
 
