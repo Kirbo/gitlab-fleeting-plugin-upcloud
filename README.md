@@ -6,7 +6,7 @@ GitLab Runner runs on a small, long-lived **runner manager** host. The plugin cr
 
 ## Prerequisites
 
-- A **runner manager** host (Linux) with [GitLab Runner](https://docs.gitlab.com/runner/install/) 16.11 or later installed. The manager doesn't need Docker.
+- A **runner manager** host (Linux, macOS or Windows) with [GitLab Runner](https://docs.gitlab.com/runner/install/) 16.11 or later installed. The manager doesn't need Docker. The CI instances it creates are always Linux servers on UpCloud.
 - An **UpCloud API credential** for the plugin. Either:
   - a Personal Access Token (recommended). Tokens only work from the IP ranges they allow, so allow the runner manager's address:
 
@@ -19,84 +19,31 @@ GitLab Runner runs on a small, long-lived **runner manager** host. The plugin cr
 - The runner manager must be able to reach the instances over SSH (port 22) — on their public IPv4 address, or on a private network with [`use_private_network`](#plugin-config-reference).
 - To build the instance template: [`upctl`](https://github.com/UpCloudLtd/upcloud-cli) and `jq`. Both are installed by [`mise install`](#development) if you work from a clone of this repository.
 
-## Installation
+## Installation and upgrading
 
-Run these steps on the runner manager.
+The plugin runs wherever GitLab Runner runs. Follow the guide for your runner manager's OS. Each one covers installing the plugin, the SSH key, registering the runner, the OS-specific config lines, restarting, upgrading and rolling back:
 
-### Quick install (recommended)
+| Runner manager OS | Guide | Installer |
+|---|---|---|
+| Linux (amd64, arm64) | [docs/install-linux.md](docs/install-linux.md) | [`install-plugin.sh`](scripts/install-plugin.sh) |
+| macOS (Apple Silicon, Intel) | [docs/install-macos.md](docs/install-macos.md) | [`install-plugin.sh`](scripts/install-plugin.sh) |
+| Windows (amd64, arm64) | [docs/install-windows.md](docs/install-windows.md) | [`install-plugin.ps1`](scripts/install-plugin.ps1) |
 
-The install script detects your OS and architecture, downloads the binary from the latest release, verifies its SHA256 checksum against the published `.sha256` release asset, and installs it to `/usr/local/bin/fleeting-plugin-upcloud` (using `sudo` if needed):
+Quick reference:
 
 ```sh
+# Linux / macOS
 curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
 ```
 
-Optional environment variables: `VERSION=v1.2.0` installs a specific release instead of the latest, and `INSTALL_PATH=/some/path/fleeting-plugin-upcloud` installs elsewhere.
-
-GitLab Runner finds manually installed fleeting plugins on `$PATH`, by binary name, which must follow the `fleeting-plugin-<name>` convention ([docs](https://docs.gitlab.com/runner/fleet_scaling/fleeting/)). So the config refers to the plugin by its full binary name:
-
-```toml
-[runners.autoscaler]
-  plugin = "fleeting-plugin-upcloud"
+```powershell
+# Windows (elevated PowerShell)
+irm https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
 ```
 
-(`~/.config/fleeting/plugins/...` is only used by `gitlab-runner fleeting install` for plugins distributed through OCI registries; it doesn't apply here.)
+Both installers verify the release checksum, install the latest release unless `VERSION` is set (e.g. `v1.4.0`), and can replace the binary while the runner is running. The runner only loads a new version when it restarts. Check the [release notes](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases) for config changes before upgrading.
 
-### Manual download
-
-Download the binary and its `.sha256` file for your platform from the [releases page](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases), verify it, and install it under the name `fleeting-plugin-upcloud` somewhere on `$PATH`:
-
-```sh
-# example for linux/amd64
-sha256sum fleeting-plugin-upcloud-linux-amd64   # must match the .sha256 file
-sudo install -m 0755 fleeting-plugin-upcloud-linux-amd64 /usr/local/bin/fleeting-plugin-upcloud
-```
-
-### Verify it's found
-
-```sh
-fleeting-plugin-upcloud version
-sudo gitlab-runner fleeting list
-```
-
-Once the [configuration](#configuration) is in place, `fleeting list` should output something like:
-
-```
-Runtime platform                                    arch=amd64 os=linux pid=12402 revision=07e534ba version=18.9.0
-runner: TCfHVcDHi, plugin: fleeting-plugin-upcloud, path: /usr/local/bin/fleeting-plugin-upcloud
-```
-
-## Upgrading
-
-GitLab Runner starts the plugin once and keeps that process running, so installing a new binary has no effect until the runner restarts. Replacing the binary while the runner is running is safe.
-
-1. **One-time setup: make restarts graceful.** By default, stopping the `gitlab-runner` service aborts running jobs. GitLab [recommends](https://docs.gitlab.com/runner/commands/#signals) a systemd drop-in that stops the runner with `SIGQUIT` instead, which waits for running jobs to finish. Also set `KillMode=mixed`. By default, systemd sends the stop signal to every process in the service, plugins included. The plugins then exit immediately, before the runner can ask them to delete instances, so `delete_instances_on_shutdown` has no effect. With `mixed`, only the runner gets the signal, and it shuts the plugins down itself:
-
-   ```sh
-   sudo mkdir -p /etc/systemd/system/gitlab-runner.service.d
-   printf '[Service]\nKillSignal=SIGQUIT\nKillMode=mixed\nTimeoutStopSec=infinity\n' | sudo tee /etc/systemd/system/gitlab-runner.service.d/kill.conf
-   sudo systemctl daemon-reload
-   systemctl show gitlab-runner -p KillSignal -p KillMode   # expect KillSignal=3, KillMode=mixed
-   ```
-
-2. **Install the new version** by re-running the [install script](#quick-install-recommended). It prints the old and new versions. Add `VERSION=vX.Y.Z` to pick a specific release.
-
-3. **Restart the runner** to load it:
-
-   ```sh
-   sudo systemctl restart gitlab-runner
-   ```
-
-   With the drop-in from step 1, this waits for running jobs to finish. With `delete_instances_on_shutdown = true` (as in the example config), the old instances are deleted on shutdown and new ones are created after the restart.
-
-4. **Check** that the new version is in use:
-
-   ```sh
-   fleeting-plugin-upcloud version
-   sudo journalctl -u gitlab-runner --since "10 min ago" | grep -i -E "fleeting|plugin|error"
-   ```
-
-To roll back, re-run the install script with `VERSION=` set to the previous release and restart again. Check the [release notes](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases) for config changes before upgrading.
+GitLab Runner finds the plugin through the `plugin` setting. That's either the bare binary name `fleeting-plugin-upcloud`, looked up on the runner's `PATH`, or the full path to the binary. The guides say which to use on each OS.
 
 ## Creating a custom UpCloud template
 
@@ -162,38 +109,11 @@ upctl server delete --delete-storages gitlab-runner-template
 upctl storage list --template
 ```
 
-Copy the UUID — this is the value to use as `template` in `[runners.autoscaler.plugin_config]`. When you rebuild the template later, update `template` and [restart the runner](#upgrading).
-
-## Setting up the runner manager
-
-### 1. Create the SSH key the runner uses to reach instances
-
-The runner service runs as root, so the key lives in root's home directory. The plugin derives the public key from it and injects it into every instance it creates:
-
-```sh
-sudo ssh-keygen -t ed25519 -N "" -f /root/.ssh/fleeting-upcloud
-```
-
-The path must match `key_path` in [the configuration](#configuration).
-
-### 2. Register the runner
-
-[Create a runner](https://docs.gitlab.com/tutorials/create_register_first_runner/#create-and-register-a-project-runner) in GitLab (project, group, or instance level). This gives you a runner authentication token (`glrt-…`). Then register it on the runner manager:
-
-```sh
-sudo gitlab-runner register --non-interactive \
-  --url https://gitlab.com \
-  --token "<glrt-... runner authentication token>" \
-  --name "UpCloud GitLab Runner" \
-  --executor docker-autoscaler \
-  --docker-image alpine:latest
-```
-
-This writes the `[[runners]]` entry to `/etc/gitlab-runner/config.toml`. Complete it as described below.
+Copy the UUID — this is the value to use as `template` in `[runners.autoscaler.plugin_config]`. When you rebuild the template later, update `template` and restart the runner.
 
 ## Configuration
 
-Edit `/etc/gitlab-runner/config.toml`. Keep the fields `gitlab-runner register` wrote (`id`, `token`, `token_obtained_at`, …) and add the autoscaler sections:
+Edit the runner's `config.toml`: `/etc/gitlab-runner/config.toml` on Linux, `~/.gitlab-runner/config.toml` on macOS, `C:\GitLab-Runner\config.toml` on Windows. Keep the fields `gitlab-runner register` wrote (`id`, `token`, `token_obtained_at`, …) and add the autoscaler sections. The example uses Linux values for `plugin` and `key_path`; your [OS guide](#installation-and-upgrading) has the right ones for macOS and Windows.
 
 ```toml
 # At most max_instances × capacity_per_instance jobs can run at once.
@@ -242,7 +162,7 @@ shutdown_timeout = 120
       idle_time = "45m0s"          # how long an idle instance is kept
 ```
 
-`config.toml` contains the UpCloud credential, so keep it readable by root only (`sudo chmod 600 /etc/gitlab-runner/config.toml`). Restart the runner after editing it: `sudo systemctl restart gitlab-runner`.
+`config.toml` contains the UpCloud credential, so keep it readable only by the account the runner runs as. Restart the runner after editing it, as described in your OS guide.
 
 Settings left out of the example (`update_interval`, `deletion_retry_interval`, `failure_threshold`, …) use GitLab Runner's defaults. See the [`[runners.autoscaler]` reference](https://docs.gitlab.com/runner/configuration/advanced-configuration/#the-runnersautoscaler-section).
 
@@ -285,17 +205,17 @@ On each autoscaler cycle the plugin:
 
 ## Troubleshooting
 
-- **Logs:** `sudo journalctl -u gitlab-runner -f`. Plugin messages are included.
-- **`fleeting list` doesn't show the plugin:** make sure `sudo which fleeting-plugin-upcloud` finds it. The runner service runs as root, so the binary must be on root's `PATH` (`/usr/local/bin` is).
+- **Logs:** plugin messages appear in the runner's log: `sudo journalctl -u gitlab-runner -f` on Linux, the Event Viewer's Application log on Windows, and see the [macOS guide](docs/install-macos.md#5-start-and-verify) for macOS.
+- **`fleeting list` doesn't show the plugin:** the runner can't find the binary. On Linux, make sure `sudo which fleeting-plugin-upcloud` finds it. On macOS and Windows, use the full path in `plugin`.
 - **`authenticating with UpCloud API` at startup:** the credentials are wrong or expired, or the request comes from an IP the token (or the account's API access settings) doesn't allow.
 - **`template … not found` at startup:** `template` doesn't match a storage UUID in your account. Check `upctl storage list --template`.
 - **Instances are created but jobs never start:** the runner can't reach them over SSH. Check that port 22 is reachable from the runner manager, that `key_path` and `username` are correct, and that the template has cloud-init (the image script installs it).
-- **`plugin process exited  error=exit status 2` when the runner stops**, followed by `decreasing instances` errors: systemd killed the plugins along with the runner. Add `KillMode=mixed` as described in [Upgrading](#upgrading). Instances left behind this way are removed after the next start.
+- **`plugin process exited  error=exit status 2` when the runner stops**, followed by `decreasing instances` errors: systemd killed the plugins along with the runner. Add `KillMode=mixed` as described in the [Linux guide](docs/install-linux.md#5-make-restarts-graceful-one-time). Instances left behind this way are removed after the next start.
 - **Leftover servers:** every server the plugin creates is titled `<title_prefix> - <hostname>` and labelled `fleeting-group=<name>` (shown by `upctl server show <uuid>`). List them by title with `upctl server list -o json | jq -r '.servers[] | select(.title | startswith("fleeting-plugin-upcloud")) | "\(.uuid) \(.state) \(.title)"'`.
 
 ## Development
 
-The toolchain (Go, golangci-lint, plus `jq` and `upctl` for the template workflow) and the tasks are managed with [mise](https://mise.jdx.dev/) and defined in [`mise.toml`](mise.toml). Install [mise](https://mise.jdx.dev/getting-started.html), then from the repository root:
+The toolchain (Go, golangci-lint, shellcheck, gotestsum, plus `jq` and `upctl` for the template workflow) and the tasks are managed with [mise](https://mise.jdx.dev/) and defined in [`mise.toml`](mise.toml). Install [mise](https://mise.jdx.dev/getting-started.html), then from the repository root:
 
 ```sh
 mise trust   # approve this repo's mise.toml (first time only)
@@ -304,14 +224,29 @@ mise install
 
 ```sh
 mise run build        # build for the current machine into bin/ (macOS: also ad-hoc signs it)
-mise run build-all    # build for linux/darwin × amd64/arm64
-mise run check        # everything CI runs: vet, lint, race-enabled tests, govulncheck
-mise tasks            # list all tasks (install, deploy, clean, …)
+mise run dist         # build every release binary with .sha256 files into dist/, as CI does
+mise run check        # vet, golangci-lint, shellcheck, race-enabled tests, govulncheck
+mise tasks            # list all tasks (build-all, install, deploy, clean, …)
 ```
 
 `mise run test-integration` runs fleeting's conformance test against **real, billed** UpCloud servers (up to 3 servers, deleted afterwards). It needs `UPCLOUD_TOKEN`, `UPCLOUD_ZONE`, `UPCLOUD_TEMPLATE` and `UPCLOUD_SSH_KEY`; see [`integration_test.go`](integration_test.go).
 
-Releases are automated: pushes to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, …) produce a new version via semantic-release. Other types (`chore:`, `ci:`, `build:`, `docs:`, …) don't trigger a release, so dependency updates that end up in the binary should use `fix(deps):`. [Renovate](renovate.json) is configured to do that. To get notified about newly disclosed vulnerabilities, add a weekly [pipeline schedule](https://docs.gitlab.com/ci/pipelines/schedules/) on `main`. It runs `govulncheck` without releasing.
+### CI/CD
+
+The [pipeline](.gitlab-ci.yml) runs these stages:
+
+1. **Test** (merge requests and pushes): vet, golangci-lint, race-enabled tests (results and coverage appear in merge requests), govulncheck, shellcheck, PSScriptAnalyzer and GitLab Secret Detection.
+2. **Build:** every release binary, with checksums, checking that the binary for the build host runs and reports the right version. Runs on merge requests too, so a cross-compile error shows up before it reaches `main`.
+3. **Release** (pushes to `main`): uploads the binaries and creates the GitLab release. This only happens after every target has built, so a release is never published half-built.
+4. **Verify:** installs the new release with `install-plugin.sh`, both pinned and as "latest", and checks the version it reports.
+
+Releases are automated: pushes to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, …) produce a new version via semantic-release. Other types (`chore:`, `ci:`, `build:`, `docs:`, …) don't trigger a release, so dependency updates that end up in the binary should use `fix(deps):`. [Renovate](renovate.json) is configured to do that.
+
+One-time project settings worth enabling:
+
+- **A weekly [pipeline schedule](https://docs.gitlab.com/ci/pipelines/schedules/) on `main`.** It runs the checks, including govulncheck, so newly disclosed vulnerabilities show up without a push. It never builds or releases.
+- **Settings > CI/CD > General pipelines > Auto-cancel redundant pipelines,** so a new push cancels the checks still running for the previous one. Release jobs are never cancelled.
+- **Integration test:** to get a manual `integration` job, add `UPCLOUD_TOKEN` (masked), `UPCLOUD_ZONE` and `UPCLOUD_TEMPLATE` as CI/CD variables, and `UPCLOUD_SSH_KEY` as a *File* variable holding a private key. Use protected variables if only `main` should run it.
 
 ## Contributing
 
