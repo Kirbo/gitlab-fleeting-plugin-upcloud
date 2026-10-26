@@ -69,7 +69,7 @@ fi
 echo "Detected platform: ${OS}/${ARCH}"
 echo "Fetching ${VERSION:-latest} release info from GitLab..."
 
-RELEASE_JSON="$(curl -fsSL "${API_URL}")"
+RELEASE_JSON="$(curl -fsSL --retry 4 --retry-delay 5 "${API_URL}")"
 
 # Extract the tag name for display
 if command -v jq &>/dev/null; then
@@ -113,12 +113,12 @@ echo "Downloading ${ASSET_NAME} (${TAG})..."
 TMPFILE="$(mktemp)"
 trap 'rm -f "${TMPFILE}"' EXIT
 
-curl -fsSL --progress-bar -o "${TMPFILE}" "${DOWNLOAD_URL}"
+curl -fsSL --retry 4 --retry-delay 5 --progress-bar -o "${TMPFILE}" "${DOWNLOAD_URL}"
 
 # --- Verify checksum (releases publish <asset>.sha256 alongside each binary) ---
 if [[ -n "${CHECKSUM_URL}" ]]; then
   echo "Verifying checksum..."
-  EXPECTED="$(curl -fsSL "${CHECKSUM_URL}" | awk '{print $1}')"
+  EXPECTED="$(curl -fsSL --retry 4 --retry-delay 5 "${CHECKSUM_URL}" | awk '{print $1}')"
   if command -v sha256sum &>/dev/null; then
     ACTUAL="$(sha256sum "${TMPFILE}" | awk '{print $1}')"
   else
