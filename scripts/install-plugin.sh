@@ -1,4 +1,14 @@
 #!/usr/bin/env bash
+# Installs (or upgrades) fleeting-plugin-upcloud from GitLab releases.
+#
+# Environment:
+#   VERSION                 release tag to install, e.g. v1.3.0 (default: latest)
+#   INSTALL_PATH            where to install (default: /usr/local/bin/fleeting-plugin-upcloud)
+#   SKIP_CHECKSUM_VERIFY=1  install even if the release publishes no checksum
+#
+# Upgrading in place is safe while GitLab Runner is running: the new binary
+# replaces the old one with an atomic rename, and the runner keeps using the
+# old plugin process until it is restarted.
 set -euo pipefail
 
 REPO="kirbo/gitlab-fleeting-plugin-upcloud"
@@ -8,6 +18,8 @@ BINARY_NAME="fleeting-plugin-upcloud"
 # Full path the binary is installed to. /usr/local/bin is on root's PATH, so
 # config.toml can reference the plugin by bare name. Override with INSTALL_PATH.
 INSTALL_PATH="${INSTALL_PATH:-/usr/local/bin/${BINARY_NAME}}"
+INSTALL_DIR="$(dirname "${INSTALL_PATH}")"
+VERSION="${VERSION:-}"
 
 # --- Detect OS ---
 OS="$(uname -s)"
@@ -31,12 +43,31 @@ case "${ARCH}" in
     ;;
 esac
 
+# --- Use sudo only when the install directory (or, if it doesn't exist yet,
+# its nearest existing parent) isn't writable ---
+WRITE_CHECK_DIR="${INSTALL_DIR}"
+while [[ ! -d "${WRITE_CHECK_DIR}" ]]; do
+  WRITE_CHECK_DIR="$(dirname "${WRITE_CHECK_DIR}")"
+done
+SUDO=""
+if [[ "$(id -u)" -ne 0 && ! -w "${WRITE_CHECK_DIR}" ]]; then
+  if ! command -v sudo &>/dev/null; then
+    echo "Error: ${INSTALL_DIR} is not writable and sudo is not available; re-run as root or set INSTALL_PATH." >&2
+    exit 1
+  fi
+  SUDO="sudo"
+fi
+
 ASSET_NAME="${BINARY_NAME}-${OS}-${ARCH}"
 ENCODED_REPO="${REPO//\//%2F}"
-API_URL="https://gitlab.com/api/v4/projects/${ENCODED_REPO}/releases/permalink/latest"
+if [[ -n "${VERSION}" ]]; then
+  API_URL="https://gitlab.com/api/v4/projects/${ENCODED_REPO}/releases/${VERSION}"
+else
+  API_URL="https://gitlab.com/api/v4/projects/${ENCODED_REPO}/releases/permalink/latest"
+fi
 
 echo "Detected platform: ${OS}/${ARCH}"
-echo "Fetching latest release info from GitLab..."
+echo "Fetching ${VERSION:-latest} release info from GitLab..."
 
 RELEASE_JSON="$(curl -fsSL "${API_URL}")"
 
@@ -69,7 +100,7 @@ else
 fi
 
 if [[ -z "${DOWNLOAD_URL}" ]]; then
-  echo "Error: could not find asset '${ASSET_NAME}' in the latest release (${TAG})." >&2
+  echo "Error: could not find asset '${ASSET_NAME}' in release ${TAG}." >&2
   echo "Available assets:" >&2
   if command -v jq &>/dev/null; then
     echo "${RELEASE_JSON}" | jq -r '.assets.links[].name' >&2
@@ -98,20 +129,37 @@ if [[ -n "${CHECKSUM_URL}" ]]; then
     exit 1
   fi
   echo "Checksum OK."
+elif [[ "${SKIP_CHECKSUM_VERIFY:-}" == "1" ]]; then
+  echo "Warning: no checksum published for ${ASSET_NAME} (${TAG}); installing unverified (SKIP_CHECKSUM_VERIFY=1)." >&2
 else
-  echo "Warning: no checksum published for ${ASSET_NAME} (${TAG}); skipping verification." >&2
+  echo "Error: no checksum published for ${ASSET_NAME} (${TAG}). Set SKIP_CHECKSUM_VERIFY=1 to install anyway." >&2
+  exit 1
 fi
 
-chmod +x "${TMPFILE}"
+PREVIOUS=""
+if [[ -x "${INSTALL_PATH}" ]]; then
+  PREVIOUS="$("${INSTALL_PATH}" version 2>/dev/null | awk '/^Version:/ {print $2}' || true)"
+fi
 
-mkdir -p "$(dirname "${INSTALL_PATH}")"
-mv "${TMPFILE}" "${INSTALL_PATH}"
-chmod +x "${INSTALL_PATH}"
+# Copy next to the target, then rename over it: a rename is atomic, so a
+# running runner never sees a half-written binary, and replacing a binary
+# that is currently executing doesn't fail with "text file busy".
+${SUDO} mkdir -p "${INSTALL_DIR}"
+${SUDO} install -m 0755 "${TMPFILE}" "${INSTALL_PATH}.new"
+${SUDO} mv -f "${INSTALL_PATH}.new" "${INSTALL_PATH}"
 
-echo "Installed: ${INSTALL_PATH}"
-echo
-echo "Reference it in /etc/gitlab-runner/config.toml:"
-echo "  [runners.autoscaler]"
-echo "    plugin = \"${BINARY_NAME}\""
-echo
-echo "Verify discovery with: gitlab-runner fleeting list"
+INSTALLED="$("${INSTALL_PATH}" version 2>/dev/null | awk '/^Version:/ {print $2}' || true)"
+if [[ -n "${PREVIOUS}" ]]; then
+  echo "Upgraded: ${INSTALL_PATH} (${PREVIOUS} -> ${INSTALLED:-${TAG}})"
+  echo
+  echo "GitLab Runner keeps using the old plugin until it restarts. Restart it"
+  echo "gracefully (see \"Upgrading\" in the README) to load the new version."
+else
+  echo "Installed: ${INSTALL_PATH} (${INSTALLED:-${TAG}})"
+  echo
+  echo "Reference it in /etc/gitlab-runner/config.toml:"
+  echo "  [runners.autoscaler]"
+  echo "    plugin = \"${BINARY_NAME}\""
+  echo
+  echo "Verify discovery with: sudo gitlab-runner fleeting list"
+fi
