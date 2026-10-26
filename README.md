@@ -240,6 +240,8 @@ The [pipeline](.gitlab-ci.yml) runs these stages:
 3. **Release** (pushes to `main`): uploads the binaries and creates the GitLab release. This only happens after every target has built, so a release is never published half-built.
 4. **Verify:** installs the new release with `install-plugin.sh`, both pinned and as "latest", and checks the version it reports.
 
+Jobs run on a self-hosted Mac mini runner (tag `macos`, a Docker executor running linux/arm64 containers). The only exception is `bump-version`, whose image is amd64-only, so it runs on the `upcloud` runner. While the Mac is offline, its jobs wait for it.
+
 Releases are automated: pushes to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, …) produce a new version via semantic-release. Other types (`chore:`, `ci:`, `build:`, `docs:`, …) don't trigger a release, so dependency updates that end up in the binary should use `fix(deps):`. [Renovate](renovate.json) is configured to do that.
 
 One-time project settings worth enabling:

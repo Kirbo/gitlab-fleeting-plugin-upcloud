@@ -37,12 +37,17 @@ variables:
 
 # Toolchain comes from mise.toml (same as local dev). Images are pinned to
 # exact tags (bumped by Renovate): a floating :latest can change under you.
+#
+# Jobs run on the Mac mini's Docker executor (`macos`: linux/arm64 containers,
+# no per-minute cost). Jobs whose image has no arm64 build override this with
+# `upcloud` (the autoscaling amd64 runner). Tags don't fall back: while the Mac
+# is offline, `macos` jobs wait for it.
 default:
   image:
     name: ghcr.io/jdx/mise:2026.10.19-debian
     entrypoint: [""]
   tags:
-    - upcloud
+    - macos
   # A newer push makes running checks pointless; release jobs opt out.
   interruptible: true
   before_script:
@@ -80,6 +85,9 @@ bump-version:
   image:
     name: registry.gitlab.com/go-semantic-release/semantic-release:2.31.0
     entrypoint: [""]
+  # The semantic-release image is amd64-only.
+  tags:
+    - upcloud
   variables:
     # semantic-release needs the full history and tags
     GIT_DEPTH: "0"
@@ -152,7 +160,8 @@ shellcheck:
 psscriptanalyzer:
   stage: test
   needs: []
-  image: mcr.microsoft.com/powershell:7.5-ubuntu-24.04
+  # arm64 build for the Mac runner (the plain tags are amd64-only).
+  image: mcr.microsoft.com/powershell:7.5-azurelinux-3.0-arm64
   variables:
     PSSCRIPTANALYZER_VERSION: "1.25.0"
   before_script: []
