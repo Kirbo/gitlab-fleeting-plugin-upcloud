@@ -1,6 +1,7 @@
 # fleeting-plugin-upcloud
 
 [![Latest Stable](https://fleeting-upcloud.devaus.eu/stable.svg)](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases)
+[![ntfy Release Channel](https://img.shields.io/badge/ntfy-release%20channel-317f6f?logo=ntfy&logoColor=white)](https://ntfy.sh/OKjnFezDgjw7JE6B)
 [![Active Users](https://fleeting-upcloud.devaus.eu/users.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
 [![Peak Users 30d](https://fleeting-upcloud.devaus.eu/peak-30d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
 [![Peak Users 365d](https://fleeting-upcloud.devaus.eu/peak-365d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
