@@ -11,7 +11,7 @@ Before you start, read the [prerequisites](../README.md#prerequisites) and build
 The same install script as on Linux detects macOS and your architecture, verifies the checksum and installs to `/usr/local/bin/fleeting-plugin-upcloud`. It asks for your password if `/usr/local/bin` isn't writable:
 
 ```sh
-curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
+curl -fsSL https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
 ```
 
 Optional environment variables, set before `bash`:
@@ -21,7 +21,7 @@ Optional environment variables, set before `bash`:
 <details>
 <summary>Manual download instead</summary>
 
-Download `fleeting-plugin-upcloud-darwin-arm64` (Apple Silicon) or `-darwin-amd64` (Intel) and its `.sha256` file from the [releases page](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases), then:
+Download `fleeting-plugin-upcloud-darwin-arm64` (Apple Silicon) or `-darwin-amd64` (Intel) and its `.sha256` file from the [releases page](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases), then:
 
 ```sh
 shasum -a 256 fleeting-plugin-upcloud-darwin-arm64   # must match the .sha256 file
@@ -79,13 +79,13 @@ gitlab-runner fleeting list
 
 ## Upgrade
 
-The runner keeps using the old plugin until it restarts. Check the [release notes](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases) for config changes first.
+The runner keeps using the old plugin until it restarts. Check the [release notes](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases) for config changes first.
 
 On macOS, `gitlab-runner stop` doesn't wait for running jobs. Before restarting, **pause the runner** in GitLab (the runner's page under **Settings > CI/CD > Runners**) and wait until it has no running jobs:
 
 ```sh
 # 1. Install the new version (prints "Upgraded: ... (old -> new)")
-curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
+curl -fsSL https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
 
 # 2. Restart (after pausing the runner and letting jobs finish)
 gitlab-runner stop; gitlab-runner start

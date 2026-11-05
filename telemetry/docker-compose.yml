@@ -1,0 +1,49 @@
+# Badge backend for this plugin's Aptabase telemetry (see "Telemetry" in ../README.md).
+#
+# Runs the telemetry-backend image from electrolux-to-mqtt (built there by
+# `pnpm backend:docker`, tagged telemetry-backend:local) a second time, pointed at
+# this plugin's Aptabase app. No code of its own: the image is configured entirely
+# through the environment below.
+#
+# Setup: the `deploy-telemetry` CI job deploys this on push to main. It writes .env
+# (gitignored) from the fnox `telemetry` profile (CLICKHOUSE_* and APTABASE_APP_ID); see
+# docs/SECRETS.md. Locally, `scripts/secrets.sh env` writes the same file. nginx/
+# reverse-proxy.conf and its certificate are installed by hand, once.
+services:
+  telemetry-backend-upcloud:
+    image: telemetry-backend:local
+    pull_policy: never
+    container_name: telemetry-backend-upcloud
+    restart: unless-stopped
+    # :3001 is taken by electrolux's backend. Bound to localhost: only nginx needs it.
+    ports:
+      - "127.0.0.1:3002:3002"
+    env_file:
+      - .env
+    environment:
+      - PORT=3002
+      - OUTPUT_DIR=/app/badge
+      - BADGE_INTERVAL_SECONDS=300
+      - RELEASES_API_URL=https://gitlab.com/api/v4/projects/KirboDev%2Fagentic-coding%2Fgitlab-fleeting-plugin-upcloud/releases
+      - RELEASES_PAGE_URL=https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases
+      # Only used by the image's legacy POST /telemetry forwarder, which nginx blocks.
+      # Set so a stray POST could never land in electrolux's app.
+      - APTABASE_APP_KEY=A-SH-3441623680
+    volumes:
+      # Served statically by nginx (root in nginx/reverse-proxy.conf). Also holds
+      # peaks-history.json, so the peaks survive restarts and redeploys.
+      - ./badge:/app/badge
+    networks:
+      - aptabase_default
+    deploy:
+      resources:
+        limits:
+          cpus: "0.2"
+          memory: "128M"
+
+networks:
+  # The Aptabase stack's network, so ClickHouse resolves by service name.
+  # Same as in electrolux-to-mqtt's telemetry-backend/docker-compose.yml.
+  aptabase_default:
+    external: true
+    name: aptabase_default

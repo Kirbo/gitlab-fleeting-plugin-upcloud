@@ -1,5 +1,9 @@
 # fleeting-plugin-upcloud
 
+[![Active Users](https://fleeting-upcloud.devaus.eu/users.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
+[![Peak Users 30d](https://fleeting-upcloud.devaus.eu/peak-30d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
+[![Peak Users 365d](https://fleeting-upcloud.devaus.eu/peak-365d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
+
 A [GitLab fleeting](https://gitlab.com/gitlab-org/fleeting/fleeting) plugin that provisions ephemeral [UpCloud](https://upcloud.com/) servers as GitLab CI runner instances via the [`docker-autoscaler` executor](https://docs.gitlab.com/runner/executors/docker_autoscaler/).
 
 GitLab Runner runs on a small, long-lived **runner manager** host. The plugin creates UpCloud servers from a template you build once (with Docker preinstalled), the runner connects to them over SSH to run jobs in Docker, and the plugin deletes them again when they're no longer needed.
@@ -33,15 +37,15 @@ Quick reference:
 
 ```sh
 # Linux / macOS
-curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
+curl -fsSL https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
 ```
 
 ```powershell
 # Windows (elevated PowerShell)
-irm https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
+irm https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
 ```
 
-Both installers verify the release checksum, install the latest release unless `VERSION` is set (e.g. `v1.4.0`), and can replace the binary while the runner is running. The runner only loads a new version when it restarts. Check the [release notes](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases) for config changes before upgrading.
+Both installers verify the release checksum, install the latest release unless `VERSION` is set (e.g. `v1.4.0`), and can replace the binary while the runner is running. The runner only loads a new version when it restarts. Check the [release notes](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases) for config changes before upgrading.
 
 GitLab Runner finds the plugin through the `plugin` setting. That's either the bare binary name `fleeting-plugin-upcloud`, looked up on the runner's `PATH`, or the full path to the binary. The guides say which to use on each OS.
 
@@ -74,7 +78,7 @@ TEMPLATE_IP="$(upctl server show gitlab-runner-template -o json \
   | jq -r '.ip_addresses[] | select(.access == "public" and .family == "IPv4") | .address')"
 
 ssh "root@${TEMPLATE_IP}" \
-  "curl -fsSL 'https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/custom-image-debian13.sh' | bash -s -- --all"
+  "curl -fsSL 'https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/custom-image-debian13.sh' | bash -s -- --all"
 ```
 
 This installs Docker and cloud-init and then cleans the server for imaging. It removes SSH host keys, `authorized_keys`, logs, machine-id and cloud-init state. If SSH isn't accepting connections yet, wait a few seconds and retry. Replace `main` in the URL with a release tag to pin the script version.
@@ -189,6 +193,7 @@ All fields go under `[runners.autoscaler.plugin_config]`.
 | `network` | no | — | UUID of an UpCloud private network (`upctl network list`) to attach to every instance, in addition to the public interface. Required by `use_private_network`. |
 | `use_private_network` | no | `false` | Connect to instances over their private IP on `network` instead of the public IP. The runner manager must be attached to the same network. |
 | `user_data` | no | — | URL or inline script for cloud-init on first boot |
+| `telemetry` | no | `true` | Send anonymous usage pings; set to `false` to opt out. See [Telemetry](#telemetry). |
 
 \* Either `token` or both `username`+`password` must be provided.
 
@@ -202,6 +207,21 @@ On each autoscaler cycle the plugin:
 4. **ConnectInfo** — returns the public (or private) IPv4 address and SSH details so the runner can connect.
 5. **Heartbeat** — reports instances that are gone, stopped or in the error state as unhealthy, so the runner replaces them.
 6. **Shutdown** — before the runner exits, waits for removals still in progress, so stopped servers aren't left behind.
+
+## Telemetry
+
+Every ~15 minutes while the runner is running, the plugin sends an anonymous ping to a self-hosted [Aptabase](https://aptabase.com) instance (`aptabase.devaus.eu`). The ping contains:
+
+- the plugin version and release channel (`stable`, or `beta` for prereleases);
+- the runner manager's OS and CPU architecture;
+- the configured UpCloud `zone` and `plan`;
+- a stable per-account id: an HMAC-SHA256 of your UpCloud account username, keyed with your API token (or password). Neither the username nor any credential is sent, and because the key never leaves the runner manager, the id can't be matched to your username even by someone who knows it.
+
+Aptabase also derives an approximate country from the request IP. Nothing about your jobs, projects, servers or GitLab instance is sent. Development builds never send pings, and failed pings are only logged at debug level, so they never affect the runner.
+
+The id lets the same install be counted once over a rolling ~24h window. All runner groups that use the same UpCloud account and credential count as one user. Creating a new token gives a new id. This is a personal project maintained in my free time, and knowing how many people use it helps me decide how much effort to put into it.
+
+To opt out, add `telemetry = false` under `[runners.autoscaler.plugin_config]` and restart the runner.
 
 ## Troubleshooting
 
@@ -237,8 +257,8 @@ The [pipeline](.gitlab-ci.yml) runs these stages:
 
 1. **Test** (merge requests and pushes): vet, golangci-lint, race-enabled tests (results and coverage appear in merge requests), govulncheck, shellcheck, PSScriptAnalyzer and GitLab Secret Detection.
 2. **Build:** every release binary, with checksums, checking that the binary for the build host runs and reports the right version. Runs on merge requests too, so a cross-compile error shows up before it reaches `main`.
-3. **Release** (pushes to `main`): uploads the binaries and creates the GitLab release. This only happens after every target has built, so a release is never published half-built.
-4. **Verify:** installs the new release with `install-plugin.sh`, both pinned and as "latest", and checks the version it reports.
+3. **Release** (pushes to `main`): uploads the binaries and creates the GitLab release. This only happens after every target has built, so a release is never published half-built. When `telemetry/` changes, `deploy-telemetry` also deploys the [telemetry](#telemetry) badge backend to its server.
+4. **Verify:** installs the new release with `install-plugin.sh`, both pinned and as "latest", and checks the version it reports. After a release, `refresh-telemetry-badges` regenerates the version badges.
 
 Jobs run on a self-hosted Mac mini runner (tag `macos`, a Docker executor running linux/arm64 containers). The only exception is `bump-version`, whose image is amd64-only, so it runs on the `upcloud` runner. While the Mac is offline, its jobs wait for it.
 
@@ -249,10 +269,11 @@ One-time project settings worth enabling:
 - **A weekly [pipeline schedule](https://docs.gitlab.com/ci/pipelines/schedules/) on `main`.** It runs the checks, including govulncheck, so newly disclosed vulnerabilities show up without a push. It never builds or releases.
 - **Settings > CI/CD > General pipelines > Auto-cancel redundant pipelines,** so a new push cancels the checks still running for the previous one. Release jobs are never cancelled.
 - **Integration test:** to get a manual `integration` job, add `UPCLOUD_TOKEN` (masked), `UPCLOUD_ZONE` and `UPCLOUD_TEMPLATE` as CI/CD variables, and `UPCLOUD_SSH_KEY` as a *File* variable holding a private key. Use protected variables if only `main` should run it.
+- **Telemetry backend:** the deploy jobs read their secrets from [`fnox.toml`](fnox.toml) with the identity GitLab gives environment `release/deploy`. Set up the keys and values once as described in [docs/SECRETS.md](docs/SECRETS.md). To redeploy without a change to `telemetry/` or `fnox.toml`, run a pipeline on `main` from the web UI.
 
 ## Contributing
 
-Issues and merge requests are welcome at [gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud).
+Issues and merge requests are welcome at [gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud).
 
 ## License
 

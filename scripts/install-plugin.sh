@@ -11,7 +11,7 @@
 # old plugin process until it is restarted.
 set -euo pipefail
 
-REPO="kirbo/gitlab-fleeting-plugin-upcloud"
+REPO="KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud"
 # Named fleeting-plugin-* so GitLab Runner discovers it via exec.LookPath("fleeting-plugin-upcloud").
 # The plugin field in config.toml must match: plugin = "fleeting-plugin-upcloud"
 BINARY_NAME="fleeting-plugin-upcloud"

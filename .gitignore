@@ -6,3 +6,10 @@ dist/
 report.xml
 coverage.out
 .golangci-cache/
+
+# Telemetry badge backend (telemetry/)
+telemetry/.env
+telemetry/badge/
+
+# Generated per maintainer machine by scripts/secrets.sh (points fnox at the keychain)
+fnox.local.toml

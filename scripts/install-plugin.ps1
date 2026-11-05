@@ -1,7 +1,7 @@
 # Installs (or upgrades) fleeting-plugin-upcloud on Windows from GitLab releases.
 # Run from an elevated PowerShell (Run as administrator):
 #
-#   irm https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
+#   irm https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
 #
 # Environment:
 #   $env:VERSION              release tag to install, e.g. v1.4.0 (default: latest)
@@ -23,7 +23,7 @@ $ProgressPreference = 'SilentlyContinue' # Invoke-WebRequest is very slow with t
 # Windows PowerShell 5.1 may not offer TLS 1.2 by default; gitlab.com requires it.
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 
-$Repo = 'kirbo/gitlab-fleeting-plugin-upcloud'
+$Repo = 'KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud'
 $BinaryName = 'fleeting-plugin-upcloud'
 $InstallPath = if ($env:INSTALL_PATH) { $env:INSTALL_PATH } else { Join-Path $env:ProgramFiles "$BinaryName\$BinaryName.exe" }
 $InstallDir = Split-Path -Parent $InstallPath

@@ -12,6 +12,6 @@ var Version = plugin.VersionInfo{
 	Name:      "fleeting-plugin-upcloud",
 	Version:   buildVersion,
 	Revision:  buildCommit,
-	Reference: "gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud",
+	Reference: "gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud",
 	BuiltAt:   buildDate,
 }

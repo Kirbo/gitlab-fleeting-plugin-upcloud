@@ -294,6 +294,72 @@ release:
         --assets-links "[${LINKS}]"
 
 # ──────────────────────────────────────────────
+# Telemetry badge backend
+# ──────────────────────────────────────────────
+
+# Shared setup for jobs that manage the badge backend (telemetry/) on its
+# server over SSH. Their secrets are in fnox.toml (profiles `deploy` and
+# `telemetry`), readable by the `deploy` tier: environment release/deploy
+# gives these jobs that tier's identity as FNOX_AGE_KEY_FILE (protected, so
+# only default-branch pipelines get it). docs/SECRETS.md has the setup.
+.telemetry-deploy:
+  interruptible: false
+  resource_group: telemetry
+  environment:
+    name: release/deploy
+    action: prepare
+  variables:
+    # Must match `root` in telemetry/nginx/reverse-proxy.conf.
+    TELEMETRY_PATH: "/home/kirbo/Projects/gitlab-fleeting-plugin-upcloud"
+    DEBIAN_FRONTEND: noninteractive
+  before_script:
+    - apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-client >/dev/null
+    - mise install fnox age
+    - . ci/secrets.sh
+
+# Deploys telemetry/ to the server: checks out this commit there (cloning the
+# repo on first run), writes telemetry/.env from the fnox `telemetry` profile
+# and (re)starts the container. Runs when telemetry/ or fnox.toml changes on
+# the default branch, so a rotated secret reaches the server on push; run a
+# pipeline from the web UI to redeploy by hand. The image
+# (telemetry-backend:local) is built by electrolux-to-mqtt's deploy job on the
+# same server.
+deploy-telemetry:
+  stage: release
+  extends: .telemetry-deploy
+  needs: []
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+      changes:
+        - telemetry/**/*
+        - fnox.toml
+  script:
+    - deploy_ssh_setup
+    # Export FIRST: a failure ends the job before the server is touched.
+    - BACKEND_ENV=$(secrets_export telemetry)
+    - test -n "${BACKEND_ENV}" || { echo "fnox profile telemetry exported nothing; refusing to overwrite the server's .env" >&2; exit 1; }
+    # Works on a fresh server, on an existing checkout, and on a directory made
+    # by hand (e.g. holding only telemetry/.env): git is set up in place, and
+    # origin is (re)pointed at this project's current URL. The gitignored
+    # .env and badge/ survive the checkout.
+    - |
+      ssh "${SERVER}" "set -e
+        mkdir -p '${TELEMETRY_PATH}'
+        cd '${TELEMETRY_PATH}'
+        [ -d .git ] || git init --quiet
+        git remote get-url origin >/dev/null 2>&1 || git remote add origin '${CI_PROJECT_URL}.git'
+        git remote set-url origin '${CI_PROJECT_URL}.git'
+        git fetch --quiet origin '${CI_DEFAULT_BRANCH}'
+        git checkout --quiet --force --detach '${CI_COMMIT_SHA}'"
+    # Piped over ssh into a 0600 file, replaced atomically (temp file + mv):
+    # the plaintext never touches the runner's disk.
+    - printf '%s\n' "${BACKEND_ENV}" | ssh "${SERVER}" "umask 077 && cd '${TELEMETRY_PATH}/telemetry' && cat > .env.tmp && mv .env.tmp .env"
+    - unset BACKEND_ENV
+    - ssh "${SERVER}" "cd '${TELEMETRY_PATH}' && docker compose -f telemetry/docker-compose.yml up -d --force-recreate"
+
+# ──────────────────────────────────────────────
 # Verify
 # ──────────────────────────────────────────────
 
@@ -328,3 +394,38 @@ verify-release:
 
       env -u VERSION INSTALL_PATH="${CI_PROJECT_DIR}/verify/latest/${BINARY_NAME}" bash scripts/install-plugin.sh
       check "${CI_PROJECT_DIR}/verify/latest/${BINARY_NAME}"
+
+# Regenerates the badges right after a release, so the stable/beta badges
+# show the new version now instead of after the backend's next 5-minute
+# cycle. Runs the image's one-shot script inside the running container; no
+# restart. Skipped until the deploy tier is set up (docs/SECRETS.md), and
+# allowed to fail: the release itself is done, and the backend's next cycle
+# catches up anyway.
+refresh-telemetry-badges:
+  stage: verify
+  extends: .telemetry-deploy
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+  needs:
+    - job: bump-version
+      artifacts: true
+    - job: release
+      artifacts: false
+    - job: deploy-telemetry
+      artifacts: false
+      optional: true
+  script:
+    - |
+      if [ -z "$VERSION" ]; then
+        echo "VERSION is empty — nothing was released."
+        exit 0
+      fi
+      if ! secrets_available; then
+        echo "No deploy-tier identity (FNOX_AGE_KEY_FILE) yet; skipping. See docs/SECRETS.md."
+        exit 0
+      fi
+    - deploy_ssh_setup
+    - ssh "${SERVER}" "cd '${TELEMETRY_PATH}' && docker compose -f telemetry/docker-compose.yml exec -T telemetry-backend-upcloud node dist/regenerate-badges.js"

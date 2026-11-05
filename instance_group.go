@@ -84,6 +84,7 @@ type InstanceGroup struct {
 	Network           string `json:"network"`             // private network UUID to attach; required by use_private_network
 	UsePrivateNetwork bool   `json:"use_private_network"` // default: false (use public IP)
 	UserData          string `json:"user_data"`           // optional: URL or script body for server initialization
+	Telemetry         *bool  `json:"telemetry"`           // anonymous usage pings, default: true
 
 	// Internal state
 	log       hclog.Logger
@@ -204,7 +205,8 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	g.svc = newUpcloudService(g.newClient())
 
 	// Validate credentials
-	if _, err := g.svc.GetAccount(ctx); err != nil {
+	account, err := g.svc.GetAccount(ctx)
+	if err != nil {
 		return provider.ProviderInfo{}, fmt.Errorf("authenticating with UpCloud API: %w", err)
 	}
 
@@ -220,7 +222,11 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 
 	g.initState()
 
-	log.Info("initialized", "zone", g.Zone, "group", g.Name, "plan", g.Plan)
+	if g.telemetryEnabled() {
+		go g.newTelemetry(account.UserName).run(g.ctx)
+	}
+
+	log.Info("initialized", "zone", g.Zone, "group", g.Name, "plan", g.Plan, "telemetry", g.telemetryEnabled())
 
 	return provider.ProviderInfo{
 		ID:        fmt.Sprintf("upcloud/%s/%s", g.Zone, g.Name),

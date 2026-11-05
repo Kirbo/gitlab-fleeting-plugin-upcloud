@@ -4,7 +4,7 @@ This guide sets up the plugin on a **Windows runner manager** (amd64 or arm64). 
 
 Before you start, read the [prerequisites](../README.md#prerequisites) and build an [instance template](../README.md#creating-a-custom-upcloud-template). The instances themselves are Linux servers on UpCloud. Only the manager runs Windows.
 
-> Windows support is new. The binaries are built and checksummed like the others, but they haven't been tested on a real Windows runner manager yet. Please [report](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/issues) anything that doesn't work.
+> Windows support is new. The binaries are built and checksummed like the others, but they haven't been tested on a real Windows runner manager yet. Please [report](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/issues) anything that doesn't work.
 
 Run every command below in an **elevated PowerShell** (Run as administrator).
 
@@ -15,7 +15,7 @@ Run every command below in an **elevated PowerShell** (Run as administrator).
 The install script detects your architecture, downloads the binary from the latest release, verifies its SHA256 checksum, and installs it to `C:\Program Files\fleeting-plugin-upcloud\fleeting-plugin-upcloud.exe`. It works in both Windows PowerShell 5.1 and PowerShell 7:
 
 ```powershell
-irm https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
+irm https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
 ```
 
 To install a specific release, or to install somewhere else, set these first:
@@ -28,7 +28,7 @@ $env:INSTALL_PATH = 'D:\Tools\fleeting-plugin-upcloud.exe'
 <details>
 <summary>Manual download instead</summary>
 
-Download `fleeting-plugin-upcloud-windows-amd64.exe` (or `-arm64.exe`) and its `.sha256` file from the [releases page](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases), then:
+Download `fleeting-plugin-upcloud-windows-amd64.exe` (or `-arm64.exe`) and its `.sha256` file from the [releases page](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases), then:
 
 ```powershell
 (Get-FileHash .\fleeting-plugin-upcloud-windows-amd64.exe -Algorithm SHA256).Hash   # must match the .sha256 file
@@ -93,13 +93,13 @@ cd C:\GitLab-Runner
 
 ## Upgrade
 
-The runner keeps using the old plugin until it restarts. Windows can't overwrite a running `.exe`, so the installer renames the old one to `fleeting-plugin-upcloud.exe.old-<timestamp>` and puts the new one in its place. Old copies are cleaned up by a later upgrade once nothing uses them. Check the [release notes](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases) for config changes first.
+The runner keeps using the old plugin until it restarts. Windows can't overwrite a running `.exe`, so the installer renames the old one to `fleeting-plugin-upcloud.exe.old-<timestamp>` and puts the new one in its place. Old copies are cleaned up by a later upgrade once nothing uses them. Check the [release notes](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases) for config changes first.
 
 On Windows, stopping the service is graceful: the runner stops taking new jobs and waits for running ones to finish, so `stop` can take a while.
 
 ```powershell
 # 1. Install the new version (prints "Upgraded: ... (old -> new)")
-irm https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
+irm https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
 
 # 2. Restart
 cd C:\GitLab-Runner

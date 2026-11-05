@@ -11,7 +11,7 @@ Before you start, read the [prerequisites](../README.md#prerequisites) and build
 The install script detects your architecture, downloads the binary from the latest release, verifies its SHA256 checksum against the published `.sha256` file, and installs it to `/usr/local/bin/fleeting-plugin-upcloud`, using `sudo` if needed:
 
 ```sh
-curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
+curl -fsSL https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
 ```
 
 Optional environment variables, set before `bash`:
@@ -21,7 +21,7 @@ Optional environment variables, set before `bash`:
 <details>
 <summary>Manual download instead</summary>
 
-Download `fleeting-plugin-upcloud-linux-amd64` (or `-arm64`) and its `.sha256` file from the [releases page](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases), then:
+Download `fleeting-plugin-upcloud-linux-amd64` (or `-arm64`) and its `.sha256` file from the [releases page](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases), then:
 
 ```sh
 sha256sum fleeting-plugin-upcloud-linux-amd64   # must match the .sha256 file
@@ -92,11 +92,11 @@ sudo journalctl -u gitlab-runner --since "5 min ago" --no-pager | grep -i -E "pl
 
 ## Upgrade
 
-GitLab Runner starts the plugin once and keeps that process, so a new binary takes effect only after the runner restarts. Replacing the binary while the runner is running is safe: the installer swaps it atomically. Check the [release notes](https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/releases) for config changes first.
+GitLab Runner starts the plugin once and keeps that process, so a new binary takes effect only after the runner restarts. Replacing the binary while the runner is running is safe: the installer swaps it atomically. Check the [release notes](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases) for config changes first.
 
 ```sh
 # 1. Install the new version (prints "Upgraded: ... (old -> new)")
-curl -fsSL https://gitlab.com/kirbo/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
+curl -fsSL https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.sh | bash
 
 # 2. Restart; with the drop-in from step 5 this waits for running jobs
 sudo systemctl restart gitlab-runner
