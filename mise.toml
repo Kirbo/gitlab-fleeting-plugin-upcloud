@@ -14,6 +14,9 @@ gotestsum = "1.13.0"
 jq = "1.8.2"
 upctl = "3.37.0"
 
+# Release notes and the next SemVer version (cliff.toml, scripts/next-version.sh)
+git-cliff = "2.14.2"
+
 # Secrets (fnox.toml, scripts/secrets.sh, ci/secrets.sh). age provides age-keygen and the
 # age-plugin-pq through which fnox reaches the post-quantum keys. See docs/SECRETS.md.
 fnox = "1.46.0"
@@ -119,6 +122,10 @@ run = "go run golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION} ./..."
 [tasks.check]
 description = "Run the main CI checks: vet, lint, lint-shell, test, vuln"
 depends = ["vet", "lint", "lint-shell", "test", "vuln"]
+
+[tasks.next-version]
+description = "Preview the next release: its notes on stderr, the version (empty if nothing to release) on stdout"
+run = "scripts/next-version.sh --notes /dev/stderr"
 
 [tasks.clean]
 description = "Remove build artifacts"

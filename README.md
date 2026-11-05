@@ -279,9 +279,9 @@ The release jobs, on `main` when the binary changes:
 
 A new push cancels the checks still running for the previous one; release and deploy jobs are never cancelled. A pipeline started from the web UI runs every job.
 
-Jobs run on a self-hosted Mac mini runner (tag `macos`, a Docker executor running linux/arm64 containers). The only exception is `bump-version`, whose image is amd64-only, so it runs on the `upcloud` runner. While the Mac is offline, its jobs wait for it.
+Jobs run on a self-hosted Mac mini runner (tag `macos`, a Docker executor running linux/arm64 containers). While the Mac is offline, jobs wait for it. No job uses the `upcloud` runner, which runs on this plugin, so a broken release can't block the pipeline that fixes it.
 
-Releases are automated: pushes to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, …) produce a new version via semantic-release. Other types (`chore:`, `ci:`, `build:`, `docs:`, …) don't trigger a release, so dependency updates that end up in the binary should use `fix(deps):`. [Renovate](renovate.json) is configured to do that. The release jobs only run when the binary changes, so a releasable commit that touches only other files (e.g. a `fix(scripts):`) is released together with the next change to the binary.
+Releases are automated: pushes to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, …) produce a new [SemVer](https://semver.org) version: a breaking change (`type!:` or a `BREAKING CHANGE:` footer) bumps the major version, `feat:` the minor, `fix:` and `perf:` the patch. The version and release notes come from [git-cliff](https://git-cliff.org) ([`cliff.toml`](cliff.toml), [`scripts/next-version.sh`](scripts/next-version.sh)); `mise run next-version` previews the next release locally. Other types (`chore:`, `ci:`, `build:`, `docs:`, …) don't trigger a release, so dependency updates that end up in the binary should use `fix(deps):`. [Renovate](renovate.json) is configured to do that. The release jobs only run when the binary changes, so a releasable commit that touches only other files (e.g. a `fix(scripts):`) is released together with the next change to the binary.
 
 One-time project settings worth enabling:
 

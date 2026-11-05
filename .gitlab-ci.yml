@@ -43,9 +43,10 @@ variables:
 # exact tags (bumped by Renovate): a floating :latest can change under you.
 #
 # Jobs run on the Mac mini's Docker executor (`macos`: linux/arm64 containers,
-# no per-minute cost). Jobs whose image has no arm64 build override this with
-# `upcloud` (the autoscaling amd64 runner). Tags don't fall back: while the Mac
-# is offline, `macos` jobs wait for it.
+# no per-minute cost); every image used has an arm64 build. Nothing depends
+# on the `upcloud` runner, which is powered by this plugin, so a broken
+# release can't block the pipeline that fixes it. Tags don't fall back: while
+# the Mac is offline, jobs wait for it.
 default:
   image:
     name: ghcr.io/jdx/mise:2026.10.19-debian
@@ -91,6 +92,9 @@ default:
     - mise.toml
     - scripts/build-dist.sh
     - scripts/ldflags.sh
+    # How the release is versioned and described
+    - cliff.toml
+    - scripts/next-version.sh
     - .gitlab-ci.yml
   shell: &files-shell
     - scripts/*.sh
@@ -121,12 +125,13 @@ default:
     - telemetry/**/*
     - fnox.toml
     - mise.toml
+    - cliff.toml
     - .golangci.yml
     - .gitlab-ci.yml
 
 # Release only from pushes to the default branch that change the binary
 # (see .files.go), never from scheduled pipelines (which exist to run the
-# checks, e.g. vulncheck). semantic-release still decides from the commit
+# checks, e.g. vulncheck). scripts/next-version.sh still decides from the commit
 # types whether there is anything to release. A releasable commit that only
 # touches other files (e.g. `fix(scripts):`) is released with the next
 # change to the binary.
@@ -141,38 +146,33 @@ default:
 # Init
 # ──────────────────────────────────────────────
 
-# Dry-run semantic-release to determine the next version and generate changelog.
-# Writes VERSION to build.env (dotenv artifact) so downstream jobs receive it
-# as a CI variable. VERSION is empty when there are no releasable commits.
+# Works out the next SemVer version from the Conventional Commits since the
+# last tag, and that release's notes (git-cliff: cliff.toml,
+# scripts/next-version.sh). Writes VERSION to build.env (dotenv artifact) so
+# downstream jobs receive it as a CI variable, and the notes to CHANGELOG.md
+# for the release job. VERSION is empty when there are no releasable commits.
+# `mise run next-version` previews the same locally.
 bump-version:
   stage: init
-  extends: .release-rules
-  image:
-    name: registry.gitlab.com/go-semantic-release/semantic-release:2.31.0
-    entrypoint: [""]
-  # The semantic-release image is amd64-only.
-  tags:
-    - upcloud
+  extends: .cache-pull
+  rules: !reference [.release-rules, rules]
   variables:
-    # semantic-release needs the full history and tags
+    # git-cliff needs the full history and tags
     GIT_DEPTH: "0"
     GIT_STRATEGY: clone
-  before_script: []
-  cache: []
+  before_script:
+    - mise install git-cliff jq
   artifacts:
     paths:
-      - .version-unreleased
       - CHANGELOG.md
       - build.env
     reports:
       dotenv: build.env
     expire_in: 1 week
   script:
-    # --allow-no-changes exits 0 when nothing is releasable; any other
-    # failure (e.g. an API error) fails the job instead of silently
+    # Any failure (e.g. git-cliff failing) fails the job instead of silently
     # skipping the release.
-    - semantic-release --version-file --changelog CHANGELOG.md --dry --allow-no-changes
-    - export VERSION=$(cat .version-unreleased 2>/dev/null || echo "")
+    - VERSION="$(mise exec git-cliff jq -- scripts/next-version.sh --notes CHANGELOG.md)"
     - echo "VERSION=${VERSION}" > build.env
     - |
       if [ -n "$VERSION" ]; then

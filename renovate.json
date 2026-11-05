@@ -12,7 +12,7 @@
   ],
   "packageRules": [
     {
-      "description": "Go modules and the Go toolchain end up in the released binary: use fix(deps) so semantic-release publishes a patched release",
+      "description": "Go modules and the Go toolchain end up in the released binary: use fix(deps) so the pipeline publishes a patched release",
       "matchManagers": [
         "gomod"
       ],
