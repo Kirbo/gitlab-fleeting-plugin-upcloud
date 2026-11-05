@@ -6,6 +6,7 @@
 [![Peak Users 365d](https://fleeting-upcloud.devaus.eu/peak-365d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
 
 [![CI/CD Pipeline Status](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/badges/main/pipeline.svg)](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/pipelines)
+[![Coverage](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/badges/main/coverage.svg)](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/pipelines)
 [![GitLab Last Commit](https://img.shields.io/gitlab/last-commit/KirboDev%2Fagentic-coding%2Fgitlab-fleeting-plugin-upcloud)](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/commits)
 [![GitLab Issues](https://img.shields.io/gitlab/issues/open/KirboDev%2Fagentic-coding%2Fgitlab-fleeting-plugin-upcloud?labels=Bug)](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/issues?label_name%5B%5D=Bug)
 [![GitLab Merge Requests](https://img.shields.io/gitlab/merge-requests/open/KirboDev%2Fagentic-coding%2Fgitlab-fleeting-plugin-upcloud)](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/merge_requests)
