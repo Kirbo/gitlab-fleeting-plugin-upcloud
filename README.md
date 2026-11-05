@@ -52,7 +52,7 @@ curl -fsSL https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upc
 irm https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/raw/main/scripts/install-plugin.ps1 | iex
 ```
 
-Both installers verify the release checksum, install the latest release unless `VERSION` is set (e.g. `v1.4.0`), and can replace the binary while the runner is running. The runner only loads a new version when it restarts. Check the [release notes](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases) for config changes before upgrading.
+Both installers verify the release checksum, install the latest release unless `VERSION` is set (e.g. `v1.4.0`), and can replace the binary while the runner is running. The runner only loads a new version when it restarts. Check the [release notes](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases) for config changes before upgrading. To hear about new releases, see [Update notifications](#update-notifications).
 
 GitLab Runner finds the plugin through the `plugin` setting. That's either the bare binary name `fleeting-plugin-upcloud`, looked up on the runner's `PATH`, or the full path to the binary. The guides say which to use on each OS.
 
@@ -201,6 +201,9 @@ All fields go under `[runners.autoscaler.plugin_config]`.
 | `use_private_network` | no | `false` | Connect to instances over their private IP on `network` instead of the public IP. The runner manager must be attached to the same network. |
 | `user_data` | no | — | URL or inline script for cloud-init on first boot |
 | `telemetry` | no | `true` | Send anonymous usage pings; set to `false` to opt out. See [Telemetry](#telemetry). |
+| `update_check` | no | `true` | Check for newer releases at startup and hourly, and log a warning when one exists. See [Update notifications](#update-notifications). |
+| `update_notify_url` | no | — | Your own [ntfy](https://ntfy.sh) topic URL, e.g. `https://ntfy.sh/<your topic>`. The plugin posts there once per new release. Requires `update_check`. |
+| `update_notify_token` | no | — | ntfy access token (`tk_…`) for a topic that needs one. Requires `update_notify_url`. |
 
 \* Either `token` or both `username`+`password` must be provided.
 
@@ -229,6 +232,32 @@ Aptabase also derives an approximate country from the request IP. Nothing about 
 The id lets the same install be counted once over a rolling ~24h window. All runner groups that use the same UpCloud account and credential count as one user. Creating a new token gives a new id. This is a personal project maintained in my free time, and knowing how many people use it helps me decide how much effort to put into it.
 
 To opt out, add `telemetry = false` under `[runners.autoscaler.plugin_config]` and restart the runner.
+
+## Update notifications
+
+The plugin checks GitLab for a newer release when it starts and then every hour. If it finds one, it logs a warning in the runner's log, once per release, like this:
+
+```text
+a newer release of the plugin is available  current=v1.4.0 latest=v1.5.0 url=https://gitlab.com/…/-/releases/v1.5.0
+```
+
+Stable builds only compare against stable releases. Prerelease builds (e.g. `1.5.0-rc.1`) also consider newer prereleases. The check only reads GitLab's public releases API and sends nothing but the request itself. Development builds never check, and failed checks are only logged at debug level. To turn it off, set `update_check = false`.
+
+To get a push notification instead of reading logs, use [ntfy](https://ntfy.sh) in one of two ways:
+
+- **Subscribe to the release channel**, [`ntfy.sh/OKjnFezDgjw7JE6B`](https://ntfy.sh/OKjnFezDgjw7JE6B), in the ntfy app or web app. The release pipeline posts each new release there once, with its release notes. Nothing to configure in the plugin.
+- **Have the plugin post to your own topic:** pick a hard-to-guess topic name (anyone who knows it can read and post to it), subscribe to it, and set it as `update_notify_url`:
+
+  ```toml
+  [runners.autoscaler.plugin_config]
+    # ...
+    update_notify_url = "https://ntfy.sh/<your topic>"
+    # update_notify_token = "tk_..."  # only for a topic that needs an access token
+  ```
+
+  The plugin posts once per new release for as long as it runs: after a restart, it posts again if it's still out of date. Each message names the runner group (`name`) that's out of date. Each `[[runners]]` entry runs its own plugin, so every group that uses the topic posts once. Self-hosted ntfy servers work too. A failed post is logged as a warning and retried on the next check.
+
+The release channel isn't accepted as `update_notify_url`: if every install posted there, subscribers would get one copy per install.
 
 ## Troubleshooting
 
@@ -275,7 +304,7 @@ The release jobs, on `main` when the binary changes:
 
 1. **Build:** every release binary, with checksums, checking that the binary for the build host runs and reports the right version. Also runs on merge requests, so a cross-compile error shows up before it reaches `main`.
 2. **Release:** uploads the binaries and creates the GitLab release. This only happens after every target has built, so a release is never published half-built.
-3. **Verify:** installs the new release with `install-plugin.sh`, both pinned and as "latest", and checks the version it reports. `refresh-telemetry-badges` then regenerates the version badges.
+3. **Verify:** installs the new release with `install-plugin.sh`, both pinned and as "latest", and checks the version it reports. `refresh-telemetry-badges` then regenerates the version badges, and `notify-release` posts the release to the [ntfy release channel](#update-notifications).
 
 A new push cancels the checks still running for the previous one; release and deploy jobs are never cancelled. A pipeline started from the web UI runs every job.
 

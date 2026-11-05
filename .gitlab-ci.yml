@@ -543,3 +543,48 @@ refresh-telemetry-badges:
       fi
     - deploy_ssh_setup
     - ssh "${SERVER}" "cd '${TELEMETRY_PATH}' && docker compose -f telemetry/docker-compose.yml exec -T telemetry-backend-upcloud node dist/regenerate-badges.js"
+
+# Posts the new release, once, to the project's public ntfy channel, which
+# users subscribe to for release notifications. The plugin never posts there
+# (it only posts to a user's own update_notify_url), so this is the channel's
+# only publisher; NTFY_RELEASE_URL must match releaseNtfyURL in
+# updatecheck.go. Runs after verify-release, so subscribers only hear about a
+# release that installs. Allowed to fail: the release itself is done.
+notify-release:
+  stage: verify
+  extends: .release-rules
+  interruptible: false
+  allow_failure: true
+  needs:
+    - job: bump-version
+      artifacts: true
+    - job: verify-release
+      artifacts: false
+  before_script: []
+  cache: []
+  variables:
+    NTFY_RELEASE_URL: "https://ntfy.sh/OKjnFezDgjw7JE6B"
+  script:
+    - |
+      if [ -z "$VERSION" ]; then
+        echo "VERSION is empty — nothing was released."
+        exit 0
+      fi
+
+      RELEASE_URL="${CI_PROJECT_URL}/-/releases/v${VERSION}"
+      # ntfy turns a message over 4096 bytes into an attachment, so long
+      # release notes are left to the release page.
+      if [ "$(wc -c < CHANGELOG.md)" -le 3800 ]; then
+        { cat CHANGELOG.md; printf '\n\n[Release notes](%s)\n' "${RELEASE_URL}"; } > ntfy-message.md
+      else
+        printf '%s v%s is out.\n\n[Release notes](%s)\n' "${BINARY_NAME}" "${VERSION}" "${RELEASE_URL}" > ntfy-message.md
+      fi
+
+      curl --fail --silent --show-error --retry 3 \
+        --header "Title: ${BINARY_NAME} v${VERSION} released" \
+        --header "Tags: package" \
+        --header "Click: ${RELEASE_URL}" \
+        --header "Markdown: yes" \
+        --data-binary @ntfy-message.md \
+        "${NTFY_RELEASE_URL}" >/dev/null
+      echo "Posted v${VERSION} to ${NTFY_RELEASE_URL}"

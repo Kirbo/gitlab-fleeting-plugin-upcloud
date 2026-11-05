@@ -85,6 +85,9 @@ type InstanceGroup struct {
 	UsePrivateNetwork bool   `json:"use_private_network"` // default: false (use public IP)
 	UserData          string `json:"user_data"`           // optional: URL or script body for server initialization
 	Telemetry         *bool  `json:"telemetry"`           // anonymous usage pings, default: true
+	UpdateCheck       *bool  `json:"update_check"`        // log when a newer release exists, default: true
+	UpdateNotifyURL   string `json:"update_notify_url"`   // optional: the user's own ntfy topic URL to post newer releases to
+	UpdateNotifyToken string `json:"update_notify_token"` // optional: ntfy access token for update_notify_url
 
 	// Internal state
 	log       hclog.Logger
@@ -136,6 +139,9 @@ func (g *InstanceGroup) validate() error {
 	}
 	if g.MaxSize < 0 {
 		return fmt.Errorf("max_size must not be negative")
+	}
+	if err := g.validateUpdateNotify(); err != nil {
+		return err
 	}
 	if g.Plan == "" {
 		g.Plan = defaultPlan
@@ -225,8 +231,12 @@ func (g *InstanceGroup) Init(ctx context.Context, log hclog.Logger, settings pro
 	if g.telemetryEnabled() {
 		go g.newTelemetry(account.UserName).run(g.ctx)
 	}
+	if g.updateCheckEnabled() {
+		go g.newUpdateChecker().run(g.ctx)
+	}
 
-	log.Info("initialized", "zone", g.Zone, "group", g.Name, "plan", g.Plan, "telemetry", g.telemetryEnabled())
+	log.Info("initialized", "zone", g.Zone, "group", g.Name, "plan", g.Plan,
+		"telemetry", g.telemetryEnabled(), "update_check", g.updateCheckEnabled(), "update_notify", g.UpdateNotifyURL != "")
 
 	return provider.ProviderInfo{
 		ID:        fmt.Sprintf("upcloud/%s/%s", g.Zone, g.Name),
