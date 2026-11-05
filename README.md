@@ -5,6 +5,8 @@
 [![Peak Users 30d](https://fleeting-upcloud.devaus.eu/peak-30d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
 [![Peak Users 365d](https://fleeting-upcloud.devaus.eu/peak-365d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
 
+[![CI/CD Pipeline Status](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/badges/main/pipeline.svg)](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/pipelines)
+
 A [GitLab fleeting](https://gitlab.com/gitlab-org/fleeting/fleeting) plugin that provisions ephemeral [UpCloud](https://upcloud.com/) servers as GitLab CI runner instances via the [`docker-autoscaler` executor](https://docs.gitlab.com/runner/executors/docker_autoscaler/).
 
 GitLab Runner runs on a small, long-lived **runner manager** host. The plugin creates UpCloud servers from a template you build once (with Docker preinstalled), the runner connects to them over SSH to run jobs in Docker, and the plugin deletes them again when they're no longer needed.
