@@ -319,7 +319,7 @@ release:
 
 # Deploys telemetry/ to the server: checks out this commit there (cloning the
 # repo on first run), writes telemetry/.env from the fnox `telemetry` profile
-# and (re)starts the container. Runs when telemetry/ or fnox.toml changes on
+# and (re)starts the container. Runs when telemetry/, fnox.toml or the deploy steps change on
 # the default branch, so a rotated secret reaches the server on push; run a
 # pipeline from the web UI to redeploy by hand. The image
 # (telemetry-backend:local) is built by electrolux-to-mqtt's deploy job on the
@@ -335,6 +335,9 @@ deploy-telemetry:
       changes:
         - telemetry/**/*
         - fnox.toml
+        # The deploy steps themselves
+        - .gitlab-ci.yml
+        - ci/secrets.sh
   script:
     - deploy_ssh_setup
     # Export FIRST: a failure ends the job before the server is touched.
@@ -357,7 +360,16 @@ deploy-telemetry:
     # the plaintext never touches the runner's disk.
     - printf '%s\n' "${BACKEND_ENV}" | ssh "${SERVER}" "umask 077 && cd '${TELEMETRY_PATH}/telemetry' && cat > .env.tmp && mv .env.tmp .env"
     - unset BACKEND_ENV
-    - ssh "${SERVER}" "cd '${TELEMETRY_PATH}' && docker compose -f telemetry/docker-compose.yml up -d --force-recreate"
+    # The image runs as the system user nodejs (uid assigned at build time),
+    # and Docker creates a missing bind-mount dir as root. A one-off root
+    # container from the same image hands the badge dir to nodejs, whatever
+    # its uid, without sudo on the host.
+    - |
+      ssh "${SERVER}" "set -e
+        cd '${TELEMETRY_PATH}'
+        mkdir -p telemetry/badge
+        docker compose -f telemetry/docker-compose.yml run --rm --no-deps --user root --entrypoint chown telemetry-backend-upcloud -R nodejs:nodejs /app/badge
+        docker compose -f telemetry/docker-compose.yml up -d --force-recreate"
 
 # ──────────────────────────────────────────────
 # Verify
