@@ -24,6 +24,9 @@ services:
       - PORT=3002
       - OUTPUT_DIR=/app/badge
       - BADGE_INTERVAL_SECONDS=300
+      # Also group active installs by OS (with per-version counts) in
+      # telemetry.json and GET /telemetry. Opt-in: electrolux-to-mqtt leaves it off.
+      - TELEMETRY_OS_BREAKDOWN=true
       - RELEASES_API_URL=https://gitlab.com/api/v4/projects/KirboDev%2Fagentic-coding%2Fgitlab-fleeting-plugin-upcloud/releases
       - RELEASES_PAGE_URL=https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases
       # Only used by the image's legacy POST /telemetry forwarder, which nginx blocks.
