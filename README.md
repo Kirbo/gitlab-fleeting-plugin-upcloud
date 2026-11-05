@@ -1,5 +1,6 @@
 # fleeting-plugin-upcloud
 
+[![Latest Stable](https://fleeting-upcloud.devaus.eu/stable.svg)](https://gitlab.com/KirboDev/agentic-coding/gitlab-fleeting-plugin-upcloud/-/releases)
 [![Active Users](https://fleeting-upcloud.devaus.eu/users.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
 [![Peak Users 30d](https://fleeting-upcloud.devaus.eu/peak-30d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
 [![Peak Users 365d](https://fleeting-upcloud.devaus.eu/peak-365d.svg)](https://fleeting-upcloud.devaus.eu/telemetry)
