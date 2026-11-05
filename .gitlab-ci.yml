@@ -9,6 +9,10 @@ include:
   - template: Jobs/Secret-Detection.gitlab-ci.yml
 
 workflow:
+  # A new push cancels the interruptible jobs of the previous pipeline on the
+  # same ref (checks); release and deploy jobs are not interruptible.
+  auto_cancel:
+    on_new_commit: interruptible
   rules:
     # Run pipeline for merge requests
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
@@ -53,7 +57,9 @@ default:
   before_script:
     - mise install
     - eval "$(mise env -s bash)"
-  cache:
+  # test and build fill the cache (pull-push); every other job that uses it
+  # only pulls (.cache-pull), so they don't spend time re-uploading it.
+  cache: &cache
     key:
       files:
         - mise.toml
@@ -64,13 +70,72 @@ default:
       - .go/cache
       - .golangci-cache
 
-# Release only from pushes to the default branch, not from scheduled
-# pipelines (which exist to run the checks, e.g. vulncheck).
+.cache-pull:
+  cache:
+    <<: *cache
+    policy: pull
+
+# Which files each job cares about. Jobs run only when the pipeline changes
+# one of their files (`rules: changes`), so a push that touches only docs
+# (*.md, docs/, LICENSE) matches no job and creates no pipeline at all.
+# `changes` compares a push with the previous push, a merge request with its
+# target branch, and is always true for web-started and scheduled pipelines.
+# .gitlab-ci.yml is in every group, so a pipeline change runs everything.
+.files:
+  # Everything that goes into the binary, or decides how it is built.
+  go: &files-go
+    - "**/*.go"
+    - go.mod
+    - go.sum
+    - .golangci.yml
+    - mise.toml
+    - scripts/build-dist.sh
+    - scripts/ldflags.sh
+    - .gitlab-ci.yml
+  shell: &files-shell
+    - scripts/*.sh
+    - ci/*.sh
+    - mise.toml
+    - .gitlab-ci.yml
+  powershell: &files-powershell
+    - scripts/*.ps1
+    - .gitlab-ci.yml
+  installer: &files-installer
+    - scripts/install-plugin.sh
+    - .gitlab-ci.yml
+  # The badge backend and its deploy steps.
+  telemetry: &files-telemetry
+    - telemetry/**/*
+    - fnox.toml
+    - ci/secrets.sh
+    - .gitlab-ci.yml
+  # Every file that could plausibly hold a secret, for secret detection:
+  # everything except docs and tool config (renovate.json, .gitignore).
+  # GitLab `changes` can't exclude paths, so new files need adding here.
+  non-docs: &files-non-docs
+    - "**/*.go"
+    - go.mod
+    - go.sum
+    - scripts/**/*
+    - ci/**/*
+    - telemetry/**/*
+    - fnox.toml
+    - mise.toml
+    - .golangci.yml
+    - .gitlab-ci.yml
+
+# Release only from pushes to the default branch that change the binary
+# (see .files.go), never from scheduled pipelines (which exist to run the
+# checks, e.g. vulncheck). semantic-release still decides from the commit
+# types whether there is anything to release. A releasable commit that only
+# touches other files (e.g. `fix(scripts):`) is released with the next
+# change to the binary.
 .release-rules:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+      changes: *files-go
 
 # ──────────────────────────────────────────────
 # Init
@@ -124,6 +189,10 @@ bump-version:
 test:
   stage: test
   needs: []
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - changes: *files-go
   variables:
     # The race detector needs cgo, and so a C compiler.
     CGO_ENABLED: "1"
@@ -143,23 +212,52 @@ test:
       junit: report.xml
     expire_in: 1 week
 
-# Also runs on a schedule (CI/CD > Schedules, e.g. weekly on the default
-# branch) so newly disclosed vulnerabilities surface without a push.
+# Also the only job of scheduled pipelines (CI/CD > Schedules, e.g. weekly on
+# the default branch), so newly disclosed vulnerabilities surface without a
+# push. Nothing else can change between pushes, so nothing else reruns.
 vulncheck:
   stage: test
+  extends: .cache-pull
   needs: []
+  rules:
+    - changes: *files-go
   script:
     - mise run vuln
 
 shellcheck:
   stage: test
+  extends: .cache-pull
   needs: []
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - changes: *files-shell
   script:
     - mise run lint-shell
+
+# Installs the latest release with the changed installer, the way users do,
+# so a broken installer is caught before it reaches main (users run it
+# straight from main, not from a release).
+verify-installer:
+  stage: test
+  needs: []
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - changes: *files-installer
+  before_script: []
+  cache: []
+  script:
+    - env -u VERSION INSTALL_PATH="${CI_PROJECT_DIR}/verify/${BINARY_NAME}" bash scripts/install-plugin.sh
+    - '"${CI_PROJECT_DIR}/verify/${BINARY_NAME}" version'
 
 psscriptanalyzer:
   stage: test
   needs: []
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - changes: *files-powershell
   # arm64 build for the Mac runner (the plain tags are amd64-only).
   image: mcr.microsoft.com/powershell:7.5-azurelinux-3.0-arm64
   variables:
@@ -177,9 +275,16 @@ psscriptanalyzer:
         "PSScriptAnalyzer: no findings"'
 
 # From the Secret-Detection template; it brings its own image and tooling.
+# Its rules are replaced so that docs-only pushes don't run it either.
 secret_detection:
   before_script: []
   cache: []
+  rules:
+    - if: '$SECRET_DETECTION_DISABLED == "true" || $SECRET_DETECTION_DISABLED == "1"'
+      when: never
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - changes: *files-non-docs
 
 # Fleeting's conformance test against real, billed UpCloud servers. Shows up
 # as a manual job once the UPCLOUD_* CI/CD variables are set (UPCLOUD_SSH_KEY
@@ -188,7 +293,10 @@ integration:
   stage: test
   needs: []
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
     - if: '$UPCLOUD_TOKEN && $UPCLOUD_ZONE && $UPCLOUD_TEMPLATE && $UPCLOUD_SSH_KEY'
+      changes: *files-go
       when: manual
   allow_failure: true
   # Cancelling mid-run would leave its servers behind.
@@ -211,7 +319,7 @@ build:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
-    - when: on_success
+    - changes: *files-go
   needs:
     - job: bump-version
       artifacts: true
@@ -303,6 +411,7 @@ release:
 # gives these jobs that tier's identity as FNOX_AGE_KEY_FILE (protected, so
 # only default-branch pipelines get it). docs/SECRETS.md has the setup.
 .telemetry-deploy:
+  extends: .cache-pull
   interruptible: false
   resource_group: telemetry
   environment:
@@ -332,12 +441,7 @@ deploy-telemetry:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
-      changes:
-        - telemetry/**/*
-        - fnox.toml
-        # The deploy steps themselves
-        - .gitlab-ci.yml
-        - ci/secrets.sh
+      changes: *files-telemetry
   script:
     - deploy_ssh_setup
     # Export FIRST: a failure ends the job before the server is touched.
@@ -417,10 +521,8 @@ refresh-telemetry-badges:
   stage: verify
   extends: .telemetry-deploy
   allow_failure: true
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule"'
-      when: never
-    - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+  # Same rules as the release jobs it needs.
+  rules: !reference [.release-rules, rules]
   needs:
     - job: bump-version
       artifacts: true

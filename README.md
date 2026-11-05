@@ -260,23 +260,34 @@ mise tasks            # list all tasks (build-all, install, deploy, clean, …)
 
 ### CI/CD
 
-The [pipeline](.gitlab-ci.yml) runs these stages:
+The [pipeline](.gitlab-ci.yml) runs only the jobs whose files a push or merge request changes. A change to only docs (`*.md`, `docs/`, `LICENSE`) or `renovate.json` starts no pipeline at all.
 
-1. **Test** (merge requests and pushes): vet, golangci-lint, race-enabled tests (results and coverage appear in merge requests), govulncheck, shellcheck, PSScriptAnalyzer and GitLab Secret Detection.
-2. **Build:** every release binary, with checksums, checking that the binary for the build host runs and reports the right version. Runs on merge requests too, so a cross-compile error shows up before it reaches `main`.
-3. **Release** (pushes to `main`): uploads the binaries and creates the GitLab release. This only happens after every target has built, so a release is never published half-built. When `telemetry/` changes, `deploy-telemetry` also deploys the [telemetry](#telemetry) badge backend to its server.
-4. **Verify:** installs the new release with `install-plugin.sh`, both pinned and as "latest", and checks the version it reports. After a release, `refresh-telemetry-badges` regenerates the version badges.
+| Changed | Jobs |
+|---|---|
+| Go code, `go.mod`/`go.sum`, `mise.toml`, the build scripts | vet, golangci-lint, race-enabled tests (results and coverage appear in merge requests), govulncheck, the build, and on `main` the release |
+| Shell scripts | shellcheck; for `install-plugin.sh` also `verify-installer`, which installs the latest release with the changed script |
+| PowerShell scripts | PSScriptAnalyzer |
+| `telemetry/`, `fnox.toml`, `ci/secrets.sh` (on `main`) | `deploy-telemetry`, which deploys the [telemetry](#telemetry) badge backend |
+| Anything but docs and tool config | GitLab Secret Detection |
+| `.gitlab-ci.yml` | everything |
+
+The release jobs, on `main` when the binary changes:
+
+1. **Build:** every release binary, with checksums, checking that the binary for the build host runs and reports the right version. Also runs on merge requests, so a cross-compile error shows up before it reaches `main`.
+2. **Release:** uploads the binaries and creates the GitLab release. This only happens after every target has built, so a release is never published half-built.
+3. **Verify:** installs the new release with `install-plugin.sh`, both pinned and as "latest", and checks the version it reports. `refresh-telemetry-badges` then regenerates the version badges.
+
+A new push cancels the checks still running for the previous one; release and deploy jobs are never cancelled. A pipeline started from the web UI runs every job.
 
 Jobs run on a self-hosted Mac mini runner (tag `macos`, a Docker executor running linux/arm64 containers). The only exception is `bump-version`, whose image is amd64-only, so it runs on the `upcloud` runner. While the Mac is offline, its jobs wait for it.
 
-Releases are automated: pushes to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, …) produce a new version via semantic-release. Other types (`chore:`, `ci:`, `build:`, `docs:`, …) don't trigger a release, so dependency updates that end up in the binary should use `fix(deps):`. [Renovate](renovate.json) is configured to do that.
+Releases are automated: pushes to `main` with releasable [Conventional Commits](https://www.conventionalcommits.org/) (`feat:`, `fix:`, …) produce a new version via semantic-release. Other types (`chore:`, `ci:`, `build:`, `docs:`, …) don't trigger a release, so dependency updates that end up in the binary should use `fix(deps):`. [Renovate](renovate.json) is configured to do that. The release jobs only run when the binary changes, so a releasable commit that touches only other files (e.g. a `fix(scripts):`) is released together with the next change to the binary.
 
 One-time project settings worth enabling:
 
-- **A weekly [pipeline schedule](https://docs.gitlab.com/ci/pipelines/schedules/) on `main`.** It runs the checks, including govulncheck, so newly disclosed vulnerabilities show up without a push. It never builds or releases.
-- **Settings > CI/CD > General pipelines > Auto-cancel redundant pipelines,** so a new push cancels the checks still running for the previous one. Release jobs are never cancelled.
+- **A weekly [pipeline schedule](https://docs.gitlab.com/ci/pipelines/schedules/) on `main`.** It runs only govulncheck, so newly disclosed vulnerabilities show up without a push. It never builds or releases.
 - **Integration test:** to get a manual `integration` job, add `UPCLOUD_TOKEN` (masked), `UPCLOUD_ZONE` and `UPCLOUD_TEMPLATE` as CI/CD variables, and `UPCLOUD_SSH_KEY` as a *File* variable holding a private key. Use protected variables if only `main` should run it.
-- **Telemetry backend:** the deploy jobs read their secrets from [`fnox.toml`](fnox.toml) with the identity GitLab gives environment `release/deploy`. Set up the keys and values once as described in [docs/SECRETS.md](docs/SECRETS.md). To redeploy without a change to `telemetry/` or `fnox.toml`, run a pipeline on `main` from the web UI.
+- **Telemetry backend:** the deploy jobs read their secrets from [`fnox.toml`](fnox.toml) with the identity GitLab gives environment `release/deploy`. Set up the keys and values once as described in [docs/SECRETS.md](docs/SECRETS.md). To redeploy without a change to its files, run a pipeline on `main` from the web UI.
 
 ## Contributing
 
