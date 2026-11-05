@@ -117,6 +117,18 @@ func TestValidateUpdateNotify(t *testing.T) {
 		{"other scheme", &InstanceGroup{UpdateNotifyURL: "ftp://ntfy.sh/my-topic"}, "http:// or https://"},
 		{"release channel", &InstanceGroup{UpdateNotifyURL: releaseNtfyURL}, "release channel"},
 		{"release channel with slash", &InstanceGroup{UpdateNotifyURL: releaseNtfyURL + "/"}, "release channel"},
+		{"release channel over http", &InstanceGroup{UpdateNotifyURL: "http://ntfy.sh/OKjnFezDgjw7JE6B"}, "release channel"},
+		{"release channel, host case", &InstanceGroup{UpdateNotifyURL: "https://NTFY.SH/OKjnFezDgjw7JE6B"}, "release channel"},
+		{"release channel, trailing dot", &InstanceGroup{UpdateNotifyURL: "https://ntfy.sh./OKjnFezDgjw7JE6B"}, "release channel"},
+		{"release channel with port", &InstanceGroup{UpdateNotifyURL: "https://ntfy.sh:443/OKjnFezDgjw7JE6B"}, "release channel"},
+		{"release channel with user info", &InstanceGroup{UpdateNotifyURL: "https://me@ntfy.sh/OKjnFezDgjw7JE6B"}, "release channel"},
+		{"release channel with query", &InstanceGroup{UpdateNotifyURL: releaseNtfyURL + "?title=x"}, "release channel"},
+		{"release channel, extra slashes", &InstanceGroup{UpdateNotifyURL: "https://ntfy.sh//OKjnFezDgjw7JE6B"}, "release channel"},
+		{"release channel, encoded", &InstanceGroup{UpdateNotifyURL: "https://ntfy.sh/%4FKjnFezDgjw7JE6B"}, "release channel"},
+		{"release channel, publish path", &InstanceGroup{UpdateNotifyURL: releaseNtfyURL + "/publish"}, "release channel"},
+		{"same topic, other server", &InstanceGroup{UpdateNotifyURL: "https://ntfy.example.com/OKjnFezDgjw7JE6B"}, ""},
+		{"topic differing in case", &InstanceGroup{UpdateNotifyURL: "https://ntfy.sh/okjnfezdgjw7je6b"}, ""},
+		{"topic with the channel as prefix", &InstanceGroup{UpdateNotifyURL: releaseNtfyURL + "x"}, ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

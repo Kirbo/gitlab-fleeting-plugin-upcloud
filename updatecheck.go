@@ -100,10 +100,32 @@ func (g *InstanceGroup) validateUpdateNotify() error {
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("update_notify_url must be an http:// or https:// URL, got %q", g.UpdateNotifyURL)
 	}
-	if strings.TrimRight(g.UpdateNotifyURL, "/") == releaseNtfyURL {
+	if isReleaseChannel(u) {
 		return fmt.Errorf("update_notify_url must be your own ntfy topic: %s is the project's release channel, which you can subscribe to directly", releaseNtfyURL)
 	}
 	return nil
+}
+
+// isReleaseChannel reports whether u publishes to the release channel in any
+// spelling ntfy accepts: either scheme, any host case, a trailing dot, an
+// explicit port, user info, a query, extra slashes, or a publish sub-path
+// such as /<topic>/publish. Topics are case-sensitive, so the topic isn't.
+func isReleaseChannel(u *url.URL) bool {
+	channel, err := url.Parse(releaseNtfyURL)
+	if err != nil {
+		return false
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	if host != channel.Hostname() {
+		return false
+	}
+	for _, seg := range strings.Split(u.Path, "/") {
+		if seg != "" {
+			// The first path segment is the topic.
+			return seg == strings.Trim(channel.Path, "/")
+		}
+	}
+	return false
 }
 
 func (g *InstanceGroup) newUpdateChecker() *updateChecker {
