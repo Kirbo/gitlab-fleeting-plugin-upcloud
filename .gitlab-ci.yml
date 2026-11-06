@@ -287,17 +287,36 @@ psscriptanalyzer:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
       when: never
     - changes: *files-powershell
-  # arm64 build for the Mac runner (the plain tags are amd64-only).
-  image: mcr.microsoft.com/powershell:7.5-azurelinux-3.0-arm64
+  # arm64 build for the Mac runner (the plain tags are amd64-only). Pinned by
+  # digest: 7.5-azurelinux-3.0-arm64 is a floating tag (every 7.5.x patch).
+  image: mcr.microsoft.com/powershell:7.5-azurelinux-3.0-arm64@sha256:60d31793816646c4dd80b719b350ca68c8a53c000cbb2740655ddafe5e127903
   variables:
     PSSCRIPTANALYZER_VERSION: "1.25.0"
+    # SHA-256 of psscriptanalyzer.<version>.nupkg. Not Install-Module: the
+    # gallery's /api/v2/package redirect has handed out a broken
+    # http://...:8080 location, so the job fetches the package straight from
+    # the gallery CDN and verifies it. When bumping the version (Renovate
+    # doesn't update this), refresh with:
+    #   curl -fsSL https://cdn.powershellgallery.com/packages/psscriptanalyzer.<version>.nupkg | sha256sum
+    # and cross-check it against the gallery's own SHA-512 (PackageHash, base64) at
+    #   https://www.powershellgallery.com/api/v2/Packages(Id='PSScriptAnalyzer',Version='<version>')
+    PSSCRIPTANALYZER_SHA256: "14e634c828eb98efb9f40b2918ba90f139ed5eccdf663a2a747736d996995d60"
   before_script: []
   cache: []
   script:
     - |
       pwsh -NoProfile -NonInteractive -Command '
         $ErrorActionPreference = "Stop"
-        Install-Module PSScriptAnalyzer -RequiredVersion $env:PSSCRIPTANALYZER_VERSION -Scope CurrentUser -Force
+        $v = $env:PSSCRIPTANALYZER_VERSION
+        $pkg = Join-Path ([IO.Path]::GetTempPath()) "psscriptanalyzer.$v.zip"
+        $dir = Join-Path ([IO.Path]::GetTempPath()) "PSScriptAnalyzer"
+        Invoke-WebRequest -Uri "https://cdn.powershellgallery.com/packages/psscriptanalyzer.$v.nupkg" -OutFile $pkg -MaximumRetryCount 5 -RetryIntervalSec 5
+        $sha = (Get-FileHash -Algorithm SHA256 $pkg).Hash.ToLowerInvariant()
+        if ($sha -ne $env:PSSCRIPTANALYZER_SHA256) { throw "PSScriptAnalyzer $v checksum mismatch: got $sha, want $env:PSSCRIPTANALYZER_SHA256" }
+        Expand-Archive -Path $pkg -DestinationPath $dir -Force
+        Import-Module (Join-Path $dir "PSScriptAnalyzer.psd1")
+        $loaded = (Get-Module PSScriptAnalyzer).Version
+        if ($loaded -ne [version]$v) { throw "loaded PSScriptAnalyzer $loaded, want $v" }
         $findings = Invoke-ScriptAnalyzer -Path scripts -Recurse
         $findings | Format-Table -AutoSize Severity, RuleName, ScriptName, Line, Message | Out-String -Width 200
         if ($findings) { exit 1 }

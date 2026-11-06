@@ -24,6 +24,9 @@ toolchain, go.mod — it triggers a release), `ci:` / `ci(deps):` for CI-only, `
 3. Go toolchain: `mise.toml` `go` and `go.mod` (`go` / `toolchain`) move together (Renovate's
    "Go toolchain" group); `go mod tidy` leaves no diff.
 4. `govulncheck` (`mise run vuln`, version from `[env] GOVULNCHECK_VERSION`) — bump that too.
+5. `PSSCRIPTANALYZER_VERSION` moved → refresh `PSSCRIPTANALYZER_SHA256` beside it in
+   `.gitlab-ci.yml` (the comment there has the commands). Renovate bumps only the version, so its
+   MR fails the `psscriptanalyzer` job on the checksum until this is done.
 
 ## Phase 2 — Verify
 `mise run check` (vet incl. the `integration` tag, golangci-lint, shellcheck, race tests, govulncheck)
@@ -32,7 +35,9 @@ Never run `mise run test-integration` unasked: it creates real, billed UpCloud s
 
 ## Phase 3 — CI
 - Images: the default `ghcr.io/jdx/mise:<version>-debian` and every other job image are exact tags
-  (Renovate bumps them, `ci(deps):`); a floating `:latest` is a defect.
+  (Renovate bumps them, `ci(deps):`); a floating `:latest` is a defect. The `psscriptanalyzer`
+  image's tag floats across 7.5.x patches, so it also carries a `@sha256:` digest (Renovate
+  refreshes it).
 - Runner routing (docs on the Mac Mini: `~/Documents/Claude/GitLab/BuildKit.md`): jobs use
   `tags: [$MAC_DOCKER]` — `macos-protected` on `main` (the workflow rule), `macos` otherwise — never
   the tag itself. Nothing depends on the `upcloud` runner (this plugin powers it).
