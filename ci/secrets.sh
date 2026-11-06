@@ -8,7 +8,7 @@
 # decrypts with it; GitLab stores nothing else.
 #
 # fnox and age (whose age-plugin-pq fnox needs for the post-quantum keys) come from
-# mise.toml: the job runs `mise install fnox age` first.
+# mise.toml: the job runs `mise install --locked fnox age` first (exact, checksummed, from mise.lock).
 #
 # GitLab masks none of these values in the job log (they are not GitLab variables):
 # never `set -x`, never echo them.

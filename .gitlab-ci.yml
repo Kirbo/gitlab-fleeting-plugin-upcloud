@@ -16,8 +16,9 @@ workflow:
   rules:
     # Run pipeline for merge requests
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    # Run pipeline for pushes to default branch
+    # Run pipeline for pushes to default branch — on the ref-protected Mac runner (see MAC_DOCKER)
     - if: "$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH"
+      variables: { MAC_DOCKER: macos-protected }
     # Run pipeline for pushes to branches without open merge requests
     - if: "$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS"
       when: never
@@ -27,6 +28,11 @@ workflow:
     - if: '$CI_PIPELINE_SOURCE == "web"'
 
 variables:
+  # The Mac Docker runner by trust (docs on the Mac Mini: ~/Documents/Claude/GitLab/BuildKit.md):
+  # `main` pipelines run on the ref-protected "Kirbo Mini Protected" (its own cache, protected-branch
+  # jobs only — the workflow rule above), every other pipeline on the shared "Kirbo Mini". Jobs name
+  # `$MAC_DOCKER`, never the tag itself.
+  MAC_DOCKER: "macos"
   BINARY_NAME: "fleeting-plugin-upcloud"
   PACKAGE_REGISTRY_URL: "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/packages/generic/${BINARY_NAME}"
   CGO_ENABLED: "0"
@@ -42,7 +48,7 @@ variables:
 # Toolchain comes from mise.toml (same as local dev). Images are pinned to
 # exact tags (bumped by Renovate): a floating :latest can change under you.
 #
-# Jobs run on the Mac mini's Docker executor (`macos`: linux/arm64 containers,
+# Jobs run on the Mac mini's Docker executor (`$MAC_DOCKER`: linux/arm64 containers,
 # no per-minute cost); every image used has an arm64 build. Nothing depends
 # on the `upcloud` runner, which is powered by this plugin, so a broken
 # release can't block the pipeline that fixes it. Tags don't fall back: while
@@ -52,7 +58,7 @@ default:
     name: ghcr.io/jdx/mise:2026.10.19-debian
     entrypoint: [""]
   tags:
-    - macos
+    - $MAC_DOCKER
   # A newer push makes running checks pointless; release jobs opt out.
   interruptible: true
   before_script:
@@ -112,6 +118,12 @@ default:
     - telemetry/**/*
     - fnox.toml
     - ci/secrets.sh
+    - mise.lock
+    - .gitlab-ci.yml
+  # The toolchain lock the deploy jobs install from.
+  mise-lock: &files-mise-lock
+    - mise.toml
+    - mise.lock
     - .gitlab-ci.yml
   # Every file that could plausibly hold a secret, for secret detection:
   # everything except docs and tool config (renovate.json, .gitignore).
@@ -125,6 +137,7 @@ default:
     - telemetry/**/*
     - fnox.toml
     - mise.toml
+    - mise.lock
     - cliff.toml
     - .golangci.yml
     - .gitlab-ci.yml
@@ -223,6 +236,22 @@ vulncheck:
     - changes: *files-go
   script:
     - mise run vuln
+
+# mise.lock must name every pin in mise.toml (Renovate bumps the pins): the deploy jobs install from
+# it in locked mode, so a stale lock would stop them. Locked mode reads only the lock — no GitHub
+# API calls — and `--dry-run` installs nothing. Fix: `mise lock` (with MISE_GITHUB_TOKEN set if
+# GitHub's anonymous API limit bites), commit mise.lock.
+mise.lock in sync:
+  stage: test
+  needs: []
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+      when: never
+    - changes: *files-mise-lock
+  before_script: []
+  cache: []
+  script:
+    - mise install --locked --dry-run
 
 shellcheck:
   stage: test
@@ -410,10 +439,15 @@ release:
 # `telemetry`), readable by the `deploy` tier: environment release/deploy
 # gives these jobs that tier's identity as FNOX_AGE_KEY_FILE (protected, so
 # only default-branch pipelines get it). docs/SECRETS.md has the setup.
+#
+# These jobs hold the deploy tier's secrets, so they restore NO cache (a cache other jobs' branches
+# could have written) and install fnox + age from mise.lock in locked mode — only the exact,
+# checksummed artifacts the lock names. openssh-client comes from Debian's signed apt repository.
+# On `main` they run on the ref-protected Mac runner ($MAC_DOCKER).
 .telemetry-deploy:
-  extends: .cache-pull
   interruptible: false
   resource_group: telemetry
+  cache: []
   environment:
     name: release/deploy
     action: prepare
@@ -421,9 +455,10 @@ release:
     # Must match `root` in telemetry/nginx/reverse-proxy.conf.
     TELEMETRY_PATH: "/home/kirbo/Projects/gitlab-fleeting-plugin-upcloud"
     DEBIAN_FRONTEND: noninteractive
+    MISE_LOCKED: "1"
   before_script:
     - apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-client >/dev/null
-    - mise install fnox age
+    - mise install --locked fnox age
     - . ci/secrets.sh
 
 # Deploys telemetry/ to the server: checks out this commit there (cloning the
