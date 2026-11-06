@@ -201,6 +201,10 @@ bump-version:
 
 test:
   stage: test
+  # The mise image plus gcc + libc6-dev (ci-images mise-cgo), pinned by digest.
+  image:
+    name: registry.gitlab.com/kirbodev/agentic-coding/ci-images/mise-cgo:20261106-c7036b18@sha256:c715b2d2143897badb4eb0771c64c3a72d63f5a8963a686a3b176fc1ba4384ed
+    entrypoint: [""]
   needs: []
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
@@ -209,9 +213,7 @@ test:
   variables:
     # The race detector needs cgo, and so a C compiler.
     CGO_ENABLED: "1"
-    DEBIAN_FRONTEND: noninteractive
   before_script:
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc libc6-dev >/dev/null
     - mise install
     - eval "$(mise env -s bash)"
   script:
@@ -402,8 +404,9 @@ build:
 release:
   stage: release
   extends: .release-rules
+  # glab v1.124.0 plus curl (ci-images glab-curl), pinned by digest.
   image:
-    name: registry.gitlab.com/gitlab-org/cli:v1.124.0
+    name: registry.gitlab.com/kirbodev/agentic-coding/ci-images/glab-curl:20261106-c7036b18@sha256:a3f49a29bda1ae24e3b90a3a8e7d62511a7397f8661edba4d86ad38fb1f98612
     entrypoint: [""]
   interruptible: false
   # Serialize with other pipelines' releases, so two quick pushes can't
@@ -424,8 +427,6 @@ release:
         echo "VERSION is empty — no releasable commits. Skipping release."
         exit 0
       fi
-
-      apk add --no-cache curl >/dev/null
 
       LINKS=""
       for FILE in dist/*; do
@@ -461,9 +462,13 @@ release:
 #
 # These jobs hold the deploy tier's secrets, so they restore NO cache (a cache other jobs' branches
 # could have written) and install fnox + age from mise.lock in locked mode — only the exact,
-# checksummed artifacts the lock names. openssh-client comes from Debian's signed apt repository.
+# checksummed artifacts the lock names. They run in ci-images mise-deploy (the mise image plus the
+# openssh client, pinned by digest): nothing is installed from a package repository at job time.
 # On `main` they run on the ref-protected Mac runner ($MAC_DOCKER).
 .telemetry-deploy:
+  image:
+    name: registry.gitlab.com/kirbodev/agentic-coding/ci-images/mise-deploy:20261106-c7036b18@sha256:3108e0742e865ce01b984ecea7dfc0034cf9c26c6df2137ef1aeaa1c015c070a
+    entrypoint: [""]
   interruptible: false
   resource_group: telemetry
   cache: []
@@ -473,10 +478,8 @@ release:
   variables:
     # Must match `root` in telemetry/nginx/reverse-proxy.conf.
     TELEMETRY_PATH: "/home/kirbo/Projects/gitlab-fleeting-plugin-upcloud"
-    DEBIAN_FRONTEND: noninteractive
     MISE_LOCKED: "1"
   before_script:
-    - apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-client >/dev/null
     - mise install --locked fnox age
     - . ci/secrets.sh
 

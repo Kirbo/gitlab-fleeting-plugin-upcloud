@@ -38,6 +38,12 @@ Never run `mise run test-integration` unasked: it creates real, billed UpCloud s
   (Renovate bumps them, `ci(deps):`); a floating `:latest` is a defect. The `psscriptanalyzer`
   image's tag floats across 7.5.x patches, so it also carries a `@sha256:` digest (Renovate
   refreshes it).
+- ci-images: `test` (mise-cgo), `release` (glab-curl) and `.telemetry-deploy` (mise-deploy) run in
+  the maintainer's own images (gitlab.com/KirboDev/agentic-coding/ci-images: tools baked in, so no
+  job installs packages; rebuilt weekly for patches). Re-pin each to its newest build
+  (`docker buildx imagetools inspect registry.gitlab.com/kirbodev/agentic-coding/ci-images/<name>:latest`,
+  or the `Pin it as:` line of that project's latest `main` job). A job that needs a new tool gets
+  it in ci-images, never an `apt-get` / `apk add` here.
 - Runner routing (docs on the Mac Mini: `~/Documents/Claude/GitLab/BuildKit.md`): jobs use
   `tags: [$MAC_DOCKER]` — `macos-protected` on `main` (the workflow rule), `macos` otherwise — never
   the tag itself. Nothing depends on the `upcloud` runner (this plugin powers it).
